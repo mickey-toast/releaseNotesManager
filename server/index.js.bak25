@@ -1,0 +1,2261 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Page statuses configuration
+const PAGE_STATUSES = {
+  draft: {
+    id: 'draft',
+    name: 'Draft',
+    pageId: process.env.CONFLUENCE_PARENT_PAGE_ID || '5530845756',
+    icon: '📝',
+    color: '#6366f1',
+    staleThreshold: 30 // days before considered stale
+  },
+  inProgress: {
+    id: 'inProgress',
+    name: 'In Progress',
+    pageId: process.env.CONFLUENCE_IN_PROGRESS_PAGE_ID || '5530550421',
+    icon: '🔄',
+    color: '#3b82f6',
+    staleThreshold: 14
+  },
+  needsAction: {
+    id: 'needsAction',
+    name: 'Needs Action',
+    pageId: process.env.CONFLUENCE_NEEDS_ACTION_PAGE_ID || '5529731171',
+    icon: '⚡',
+    color: '#f59e0b',
+    staleThreshold: 7
+  },
+  published: {
+    id: 'published',
+    name: 'Published',
+    pageId: process.env.CONFLUENCE_PUBLISHED_PAGE_ID || '5529862458',
+    icon: '✅',
+    color: '#10b981',
+    staleThreshold: null // no stale threshold for published
+  },
+  discard: {
+    id: 'discard',
+    name: 'Discarded',
+    pageId: process.env.CONFLUENCE_DISCARD_PAGE_ID || '5529600531',
+    icon: '🗑️',
+    color: '#64748b',
+    staleThreshold: null
+  }
+};
+
+// Helper function to get credentials from request (headers or .env fallback)
+function getCredentialsFromRequest(req) {
+  const email = req.headers['x-atlassian-email'] || process.env.CONFLUENCE_EMAIL;
+  const token = req.headers['x-atlassian-token'] || process.env.CONFLUENCE_API_TOKEN;
+  const baseUrl = req.headers['x-atlassian-base-url'] || process.env.CONFLUENCE_BASE_URL || 'https://toasttab.atlassian.net/wiki';
+  
+  if (!email || !token) {
+    throw new Error('Missing Atlassian credentials. Please configure settings.');
+  }
+  
+  return { email, token, baseUrl };
+}
+
+// Helper function to create API clients from credentials
+function createApiClients(credentials) {
+  const confluenceApi = axios.create({
+    baseURL: credentials.baseUrl,
+    auth: {
+      username: credentials.email,
+      password: credentials.token
+    },
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+    }
+  });
+
+  // Extract Jira base URL from Confluence base URL
+  const jiraBaseUrl = credentials.baseUrl.replace('/wiki', '');
+  
+  const jiraApi = axios.create({
+    baseURL: jiraBaseUrl,
+    auth: {
+      username: credentials.email,
+      password: credentials.token
+    },
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+    }
+  });
+
+  return { confluenceApi, jiraApi };
+}
+
+// Legacy API clients for backward compatibility (using .env)
+const confluenceApi = axios.create({
+  baseURL: process.env.CONFLUENCE_BASE_URL || 'https://toasttab.atlassian.net/wiki',
+  auth: {
+    username: process.env.CONFLUENCE_EMAIL || '',
+    password: process.env.CONFLUENCE_API_TOKEN || ''
+  },
+  headers: {
+    'Accept': 'application/json',
+    'Content-Type': 'application/json'
+  }
+});
+
+const jiraApi = axios.create({
+  baseURL: 'https://toasttab.atlassian.net',
+  auth: {
+    username: process.env.CONFLUENCE_EMAIL || '',
+    password: process.env.CONFLUENCE_API_TOKEN || ''
+  },
+  headers: {
+    'Accept': 'application/json',
+    'Content-Type': 'application/json'
+  }
+});
+
+// Helper function to extract Jira ticket from Confluence page content
+function extractJiraTicket(htmlContent) {
+  if (!htmlContent) return null;
+  
+  // List of ticket prefixes to exclude (e.g., RF tickets should not be used)
+  const excludedPrefixes = ['RF'];
+  
+  // Helper to check if a ticket should be excluded
+  const isExcluded = (ticketId) => {
+    const prefix = ticketId.split('-')[0];
+    return excludedPrefixes.includes(prefix);
+  };
+  
+  // Pattern 1: Link with ticket ID in href near "Reference Ticket" (highest priority)
+  // Look for "Reference Ticket" context first, then find links nearby
+  const referenceSectionPattern = /Reference\s*Ticket[^<]*?(?:<[^>]*>)*[^<]*?href="[^"]*\/browse\/([A-Z]+-\d+)[^"]*"/i;
+  const referenceLinkMatch = htmlContent.match(referenceSectionPattern);
+  if (referenceLinkMatch && !isExcluded(referenceLinkMatch[1])) {
+    return referenceLinkMatch[1];
+  }
+  
+  // Pattern 2: Plain text ticket ID near "Reference Ticket" (high priority)
+  const textPattern = /Reference\s*Ticket[^<]*?([A-Z]+-\d+)/i;
+  const textMatch = htmlContent.match(textPattern);
+  if (textMatch && !isExcluded(textMatch[1])) {
+    return textMatch[1];
+  }
+  
+  // Pattern 3: Link with ticket ID in href anywhere (but exclude RF tickets)
+  const linkPattern = /href="[^"]*\/browse\/([A-Z]+-\d+)[^"]*"/gi;
+  const linkMatches = [];
+  let linkMatch;
+  while ((linkMatch = linkPattern.exec(htmlContent)) !== null) {
+    if (!isExcluded(linkMatch[1])) {
+      linkMatches.push(linkMatch[1]);
+    }
+  }
+  // Return the first non-excluded link match
+  if (linkMatches.length > 0) {
+    return linkMatches[0];
+  }
+  
+  // Pattern 4: Any Jira-style ticket ID in the content (but exclude RF tickets)
+  // Find all matches and filter out excluded ones
+  const anyTicketPattern = /\b([A-Z]{2,}-\d+)\b/g;
+  const allMatches = [];
+  let anyMatch;
+  while ((anyMatch = anyTicketPattern.exec(htmlContent)) !== null) {
+    if (!isExcluded(anyMatch[1])) {
+      allMatches.push(anyMatch[1]);
+    }
+  }
+  // Return the first non-excluded match
+  if (allMatches.length > 0) {
+    return allMatches[0];
+  }
+  
+  return null;
+}
+
+// Helper function to extract Reference Ticket Assignee from content
+function extractReferenceAssignee(htmlContent) {
+  if (!htmlContent) return null;
+  
+  const pattern = /Reference\s*Ticket\s*Assignee[:\s]*([^<\n]+)/i;
+  const match = htmlContent.match(pattern);
+  if (match) return match[1].trim();
+  
+  return null;
+}
+
+// Helper function to calculate days ago
+function daysAgo(dateString) {
+  if (!dateString) return null;
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffTime = Math.abs(now - date);
+  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+  return diffDays;
+}
+
+// Test connection endpoint
+app.post('/api/test-connection', async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi } = createApiClients(credentials);
+    const spaceKey = req.body.spaceKey || process.env.CONFLUENCE_SPACE_KEY;
+    
+    // Try to access Confluence space
+    await confluenceApi.get(`/rest/api/space/${spaceKey}`);
+    
+    res.json({ success: true, message: 'Connection successful' });
+  } catch (error) {
+    res.status(401).json({
+      success: false,
+      error: error.response?.data?.message || error.message || 'Connection failed'
+    });
+  }
+});
+
+// Get configuration including all statuses
+app.get('/api/config', (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    
+    // Use page IDs from request headers (user settings) or fallback to .env
+    const statuses = {
+      draft: {
+        ...PAGE_STATUSES.draft,
+        pageId: req.headers['x-draft-page-id'] || PAGE_STATUSES.draft.pageId
+      },
+      inProgress: {
+        ...PAGE_STATUSES.inProgress,
+        pageId: req.headers['x-in-progress-page-id'] || PAGE_STATUSES.inProgress.pageId
+      },
+      needsAction: {
+        ...PAGE_STATUSES.needsAction,
+        pageId: req.headers['x-needs-action-page-id'] || PAGE_STATUSES.needsAction.pageId
+      },
+      published: {
+        ...PAGE_STATUSES.published,
+        pageId: req.headers['x-published-page-id'] || PAGE_STATUSES.published.pageId
+      },
+      discard: {
+        ...PAGE_STATUSES.discard,
+        pageId: req.headers['x-discard-page-id'] || PAGE_STATUSES.discard.pageId
+      }
+    };
+    
+    res.json({
+      statuses,
+      spaceKey: req.headers['x-space-key'] || process.env.CONFLUENCE_SPACE_KEY,
+      baseUrl: credentials.baseUrl
+    });
+  } catch (error) {
+    res.status(401).json({
+      error: error.message,
+      requiresAuth: true
+    });
+  }
+});
+
+// Get all pages across all statuses (for dashboard)
+app.get('/api/pages/all', async (req, res) => {
+  try {
+    const allPages = {};
+    const stats = {
+      total: 0,
+      byStatus: {},
+      staleByStatus: {},
+      avgDaysInDraft: 0
+    };
+
+    for (const [statusKey, status] of Object.entries(PAGE_STATUSES)) {
+      try {
+        const response = await confluenceApi.get(`/rest/api/content/${status.pageId}/child/page`, {
+          params: {
+            expand: 'version,history',
+            limit: 100
+          }
+        });
+
+        const pages = response.data.results.map(page => ({
+          id: page.id,
+          title: page.title,
+          status: statusKey,
+          createdDaysAgo: daysAgo(page.history?.createdDate),
+          lastModifiedDaysAgo: daysAgo(page.version?.when),
+          author: page.history?.createdBy?.displayName
+        }));
+
+        allPages[statusKey] = pages;
+        stats.byStatus[statusKey] = pages.length;
+        stats.total += pages.length;
+
+        // Count stale pages
+        if (status.staleThreshold) {
+          stats.staleByStatus[statusKey] = pages.filter(
+            p => p.lastModifiedDaysAgo >= status.staleThreshold
+          ).length;
+        }
+      } catch (e) {
+        console.log(`Could not fetch pages for status ${statusKey}:`, e.message);
+        allPages[statusKey] = [];
+        stats.byStatus[statusKey] = 0;
+      }
+    }
+
+    // Calculate avg days in draft
+    if (allPages.draft && allPages.draft.length > 0) {
+      const totalDays = allPages.draft.reduce((sum, p) => sum + (p.createdDaysAgo || 0), 0);
+      stats.avgDaysInDraft = Math.round(totalDays / allPages.draft.length);
+    }
+
+    res.json({ pages: allPages, stats });
+  } catch (error) {
+    console.error('Error fetching all pages:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch pages' });
+  }
+});
+
+// Get child pages of a specific status/parent page
+app.get('/api/pages', async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi } = createApiClients(credentials);
+    
+    const status = req.query.status || 'draft';
+    
+    // Get page ID from headers or use default
+    const pageIdMap = {
+      draft: req.headers['x-draft-page-id'] || PAGE_STATUSES.draft.pageId,
+      inProgress: req.headers['x-in-progress-page-id'] || PAGE_STATUSES.inProgress.pageId,
+      needsAction: req.headers['x-needs-action-page-id'] || PAGE_STATUSES.needsAction.pageId,
+      published: req.headers['x-published-page-id'] || PAGE_STATUSES.published.pageId,
+      discard: req.headers['x-discard-page-id'] || PAGE_STATUSES.discard.pageId
+    };
+    
+    const statusConfig = { ...PAGE_STATUSES[status], pageId: pageIdMap[status] };
+    
+    if (!statusConfig) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const parentPageId = statusConfig.pageId;
+    
+    // Get child pages with metadata and body content for Jira ticket extraction
+    const response = await confluenceApi.get(`/rest/api/content/${parentPageId}/child/page`, {
+      params: {
+        expand: 'version,history,metadata.labels,body.storage',
+        limit: 100
+      }
+    });
+
+    const pages = await Promise.all(response.data.results.map(async (page) => {
+      // Extract Jira ticket from page body
+      const bodyContent = page.body?.storage?.value || '';
+      const jiraTicket = extractJiraTicket(bodyContent);
+      const referenceAssignee = extractReferenceAssignee(bodyContent);
+      // Get the last comment for each page
+      let lastComment = null;
+      let commentCount = 0;
+      
+      try {
+        const commentsResponse = await confluenceApi.get(`/rest/api/content/${page.id}/child/comment`, {
+          params: {
+            expand: 'version,history',
+            limit: 1,
+            order: 'desc'
+          }
+        });
+        
+        commentCount = commentsResponse.data.size || 0;
+        if (commentsResponse.data.results && commentsResponse.data.results.length > 0) {
+          const comment = commentsResponse.data.results[0];
+          lastComment = {
+            id: comment.id,
+            date: comment.version?.when || comment.history?.createdDate,
+            author: comment.version?.by?.displayName || comment.history?.createdBy?.displayName
+          };
+        }
+      } catch (e) {
+        // Silently fail for comments
+      }
+
+      const createdDate = page.history?.createdDate;
+      const lastModified = page.version?.when;
+      
+      // Determine the last activity date
+      let lastActivityDate = lastModified;
+      if (lastComment && lastComment.date) {
+        const commentDate = new Date(lastComment.date);
+        const modifiedDate = new Date(lastModified);
+        if (commentDate > modifiedDate) {
+          lastActivityDate = lastComment.date;
+        }
+      }
+
+      return {
+        id: page.id,
+        title: page.title,
+        url: `${process.env.CONFLUENCE_BASE_URL}${page._links.webui}`,
+        status,
+        createdDate,
+        createdDaysAgo: daysAgo(createdDate),
+        lastModified,
+        lastModifiedDaysAgo: daysAgo(lastModified),
+        lastActivityDate,
+        lastActivityDaysAgo: daysAgo(lastActivityDate),
+        lastComment,
+        lastCommentDaysAgo: lastComment ? daysAgo(lastComment.date) : null,
+        commentCount,
+        version: page.version?.number,
+        author: page.history?.createdBy?.displayName,
+        labels: page.metadata?.labels?.results?.map(l => l.name) || [],
+        isStale: statusConfig.staleThreshold 
+          ? daysAgo(lastActivityDate) >= statusConfig.staleThreshold 
+          : false,
+        jiraTicket: jiraTicket,
+        jiraUrl: jiraTicket ? `https://toasttab.atlassian.net/browse/${jiraTicket}` : null,
+        referenceAssignee: referenceAssignee
+      };
+    }));
+
+    // Sort by last activity (oldest first)
+    pages.sort((a, b) => b.lastActivityDaysAgo - a.lastActivityDaysAgo);
+
+    res.json({
+      pages,
+      total: pages.length,
+      status,
+      statusConfig
+    });
+  } catch (error) {
+    console.error('Error fetching pages:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch pages',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Get comments for a specific page
+app.get('/api/pages/:pageId/comments', async (req, res) => {
+  try {
+    const { pageId } = req.params;
+    console.log(`[GET /api/pages/${pageId}/comments] Request received`);
+    
+    // Get credentials from request
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi: userConfluenceApi } = createApiClients(credentials);
+    
+    console.log(`[GET /api/pages/${pageId}/comments] Fetching comments from Confluence API v2`);
+    
+    // Try Confluence v2 API first, fallback to v1 if it fails
+    let response;
+    let usingV2 = false;
+    try {
+      response = await userConfluenceApi.get(`/wiki/api/v2/footer-comments`, {
+        params: {
+          pageId: pageId,
+          limit: 100,
+          sort: 'created-date-desc'
+        }
+      });
+      usingV2 = true;
+      console.log(`[GET /api/pages/${pageId}/comments] Confluence API v2 response status: ${response.status}`);
+      console.log(`[GET /api/pages/${pageId}/comments] v2 Response data:`, JSON.stringify(response.data, null, 2).substring(0, 500));
+    } catch (v2Error) {
+      console.log(`[GET /api/pages/${pageId}/comments] v2 API failed (${v2Error.response?.status || v2Error.message}), trying v1 API`);
+      // Fallback to v1 API
+      try {
+        response = await userConfluenceApi.get(`/rest/api/content/${pageId}/child/comment`, {
+          params: {
+            expand: 'body.view,version,history,children.comment',
+            limit: 100,
+            order: 'desc'
+          }
+        });
+        usingV2 = false;
+        console.log(`[GET /api/pages/${pageId}/comments] Confluence API v1 response status: ${response.status}`);
+        console.log(`[GET /api/pages/${pageId}/comments] v1 API returned ${response.data?.results?.length || 0} comments`);
+        console.log(`[GET /api/pages/${pageId}/comments] v1 Response data:`, JSON.stringify(response.data, null, 2).substring(0, 500));
+      } catch (v1Error) {
+        console.error(`[GET /api/pages/${pageId}/comments] Both v2 and v1 API failed`);
+        console.error(`[GET /api/pages/${pageId}/comments] v1 Error:`, v1Error.response?.status, v1Error.response?.data || v1Error.message);
+        throw v1Error; // Re-throw to be caught by outer catch
+      }
+    }
+
+    // Process comments and build thread structure
+    // Handle both v2 and v1 API response formats
+    let allComments = [];
+    const commentsData = response.data.results || [];
+    
+    console.log(`[GET /api/pages/${pageId}/comments] Using ${usingV2 ? 'v2' : 'v1'} API`);
+    console.log(`[GET /api/pages/${pageId}/comments] Processing ${commentsData.length} comments from API`);
+    console.log(`[GET /api/pages/${pageId}/comments] Response data keys:`, Object.keys(response.data || {}));
+    console.log(`[GET /api/pages/${pageId}/comments] Full response.data:`, JSON.stringify(response.data, null, 2));
+    
+    if (commentsData.length > 0) {
+      console.log(`[GET /api/pages/${pageId}/comments] First comment keys:`, Object.keys(commentsData[0]));
+      console.log(`[GET /api/pages/${pageId}/comments] First comment:`, JSON.stringify(commentsData[0], null, 2));
+      console.log(`[GET /api/pages/${pageId}/comments] First comment body structure:`, commentsData[0].body ? Object.keys(commentsData[0].body) : 'no body');
+    }
+    
+    if (commentsData.length > 0) {
+      // Check which format we have
+      const firstComment = commentsData[0];
+      const isV2Format = firstComment.body?.value !== undefined || firstComment.createdAt !== undefined;
+      
+      console.log(`[GET /api/pages/${pageId}/comments] Detected format: ${isV2Format ? 'v2' : 'v1'}`);
+      
+      if (isV2Format) {
+        // v2 API format (has body.value)
+        allComments = commentsData.map(comment => {
+          const processed = {
+            id: comment.id,
+            body: comment.body?.value || comment.body || '',
+            author: comment.author?.displayName || comment.author?.publicName || 'Unknown',
+            authorAvatar: comment.author?.profilePicture?.path || null,
+            createdDate: comment.createdAt || comment.created?.at,
+            daysAgo: daysAgo(comment.createdAt || comment.created?.at),
+            parentId: comment.parentCommentId || null // Confluence v2 threading
+          };
+          console.log(`[GET /api/pages/${pageId}/comments] Processed v2 comment:`, processed.id, processed.author);
+          return processed;
+        });
+      } else {
+      // v1 API format (has body.view.value)
+      // For v1 API, comments that are replies are nested in children.comment.results
+      // Top-level comments in the results array are root comments
+      const allV1Comments = [];
+      
+      const processV1Comment = (comment, parentId = null) => {
+        // Add this comment
+        const processed = {
+          id: comment.id,
+          body: comment.body?.view?.value || comment.body?.storage?.value || '',
+          author: comment.version?.by?.displayName || comment.history?.createdBy?.displayName || 'Unknown',
+          authorAvatar: comment.version?.by?.profilePicture?.path || comment.history?.createdBy?.profilePicture?.path || null,
+          createdDate: comment.history?.createdDate,
+          daysAgo: daysAgo(comment.history?.createdDate),
+          parentId: parentId // Set parentId only if this is a nested comment (reply)
+        };
+        allV1Comments.push(processed);
+        console.log(`[GET /api/pages/${pageId}/comments] Processed v1 comment:`, processed.id, processed.author, parentId ? `(reply to ${parentId})` : '(root)');
+        
+        // Process nested comments (replies) - these are the actual threaded replies
+        if (comment.children?.comment?.results && comment.children.comment.results.length > 0) {
+          comment.children.comment.results.forEach(childComment => {
+            // Recursively process nested comments
+            processV1Comment(childComment, comment.id);
+          });
+        }
+      };
+      
+      // Process all top-level comments (these are root comments, not replies)
+      commentsData.forEach(comment => {
+        processV1Comment(comment, null); // null means it's a root comment
+      });
+      
+      allComments = allV1Comments;
+      }
+    }
+
+    console.log(`[GET /api/pages/${pageId}/comments] Processed ${allComments.length} comments before threading`);
+    
+    // If we have no processed comments but the API says there are comments, log a warning
+    if (allComments.length === 0 && (response.data.totalSize > 0 || response.data.size > 0)) {
+      console.warn(`[GET /api/pages/${pageId}/comments] WARNING: API reports comments exist but none were processed!`);
+      console.warn(`[GET /api/pages/${pageId}/comments] Response structure:`, JSON.stringify(response.data, null, 2));
+    }
+    
+    // Build thread structure (group by parent)
+    const threadMap = new Map();
+    const rootComments = [];
+    
+    allComments.forEach(comment => {
+      // Only add to threading if comment has required fields
+      if (!comment.id) {
+        console.warn(`[GET /api/pages/${pageId}/comments] Skipping comment without id:`, comment);
+        return;
+      }
+      
+      // Handle parentId - if it exists and is not null, it's a reply
+      if (comment.parentId) {
+        const parentIdStr = String(comment.parentId);
+        if (!threadMap.has(parentIdStr)) {
+          threadMap.set(parentIdStr, []);
+        }
+        threadMap.get(parentIdStr).push(comment);
+        console.log(`[GET /api/pages/${pageId}/comments] Comment ${comment.id} is a reply to ${parentIdStr}`);
+      } else {
+        // Root comment (no parent)
+        rootComments.push(comment);
+        console.log(`[GET /api/pages/${pageId}/comments] Comment ${comment.id} is a root comment`);
+      }
+    });
+    
+    console.log(`[GET /api/pages/${pageId}/comments] Found ${rootComments.length} root comments and ${Array.from(threadMap.values()).flat().length} reply comments`);
+    
+    // Attach replies to their parents
+    const buildThread = (comment) => {
+      const commentIdStr = String(comment.id);
+      const replies = threadMap.get(commentIdStr) || [];
+      return {
+        ...comment,
+        replies: replies.map(buildThread).sort((a, b) => {
+          const dateA = new Date(a.createdDate);
+          const dateB = new Date(b.createdDate);
+          return dateA - dateB;
+        })
+      };
+    };
+    
+    const threadedComments = rootComments.map(buildThread).sort((a, b) => {
+      const dateA = new Date(a.createdDate);
+      const dateB = new Date(b.createdDate);
+      return dateB - dateA; // Descending (newest first)
+    });
+    
+    // If we have processed comments but no threaded comments, return the processed comments as-is
+    if (allComments.length > 0 && threadedComments.length === 0) {
+      console.warn(`[GET /api/pages/${pageId}/comments] WARNING: Comments processed but none in threaded structure. Returning flat list.`);
+      threadedComments.push(...allComments.map(c => ({ ...c, replies: [] })));
+    }
+
+    console.log(`[GET /api/pages/${pageId}/comments] Returning ${threadedComments.length} threaded comments`);
+    console.log(`[GET /api/pages/${pageId}/comments] Total from API: ${response.data.totalSize || response.data.size || 'unknown'}`);
+    console.log(`[GET /api/pages/${pageId}/comments] All comments count: ${allComments.length}`);
+
+    res.json({
+      comments: threadedComments,
+      total: response.data.totalSize || response.data.size || allComments.length
+    });
+  } catch (error) {
+    const pageId = req.params.pageId;
+    console.error(`[GET /api/pages/${pageId}/comments] Error occurred:`, error.message);
+    console.error(`[GET /api/pages/${pageId}/comments] Error status:`, error.response?.status);
+    console.error(`[GET /api/pages/${pageId}/comments] Error response data:`, JSON.stringify(error.response?.data, null, 2));
+    console.error(`[GET /api/pages/${pageId}/comments] Error config URL:`, error.config?.url);
+    console.error(`[GET /api/pages/${pageId}/comments] Error stack:`, error.stack);
+    
+    const statusCode = error.response?.status || 500;
+    const errorMessage = error.response?.data?.message || error.response?.data?.errorMessages?.join(', ') || error.message || 'Unknown error';
+    
+    res.status(statusCode).json({
+      error: 'Failed to fetch comments',
+      details: errorMessage
+    });
+  }
+});
+
+// Add a comment to a page
+app.post('/api/pages/:pageId/comments', async (req, res) => {
+  try {
+    const { pageId } = req.params;
+    const { body, parentId } = req.body; // parentId for threading
+
+    // Get credentials from request
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi: userConfluenceApi } = createApiClients(credentials);
+
+    // Use Confluence v2 API for threaded comments
+    // For replies, use /wiki/api/v2/footer-comments with parentCommentId
+    // For new comments, we can use either v1 or v2 API
+    if (parentId) {
+      // Threaded reply - use v2 API
+      const commentPayload = {
+        pageId: pageId,
+        parentCommentId: parentId,
+        body: {
+          representation: 'storage',
+          value: body
+        }
+      };
+
+      console.log('Posting Confluence threaded comment with payload:', JSON.stringify(commentPayload, null, 2));
+
+      const response = await userConfluenceApi.post(`/wiki/api/v2/footer-comments`, commentPayload);
+
+      res.json({
+        success: true,
+        comment: {
+          id: response.data.id,
+          body: body
+        }
+      });
+    } else {
+      // New comment - use v1 API (backward compatible)
+      const commentPayload = {
+        type: 'comment',
+        container: {
+          id: pageId,
+          type: 'page'
+        },
+        body: {
+          storage: {
+            value: body,
+            representation: 'storage'
+          }
+        }
+      };
+
+      const response = await userConfluenceApi.post(`/rest/api/content`, commentPayload);
+
+      res.json({
+        success: true,
+        comment: {
+          id: response.data.id,
+          body: body
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error adding comment:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to add comment',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Move a page to a different status
+app.post('/api/pages/:pageId/move', async (req, res) => {
+  try {
+    const { pageId } = req.params;
+    const { targetStatus, jiraComment } = req.body; // Optional Jira comment
+
+    const targetStatusConfig = PAGE_STATUSES[targetStatus];
+    if (!targetStatusConfig) {
+      return res.status(400).json({ error: 'Invalid target status' });
+    }
+
+    // Get the current page
+    const currentPage = await confluenceApi.get(`/rest/api/content/${pageId}`, {
+      params: {
+        expand: 'version,body.storage,ancestors'
+      }
+    });
+
+    // Extract Jira ticket from page body
+    const bodyContent = currentPage.data.body?.storage?.value || '';
+    const jiraTicket = extractJiraTicket(bodyContent);
+
+    // Move the page by updating its ancestors
+    const response = await confluenceApi.put(`/rest/api/content/${pageId}`, {
+      id: pageId,
+      type: 'page',
+      title: currentPage.data.title,
+      version: {
+        number: currentPage.data.version.number + 1
+      },
+      ancestors: [{
+        id: targetStatusConfig.pageId
+      }],
+      body: currentPage.data.body
+    });
+
+    // If Jira comment or labels are provided and we have a Jira ticket, update the ticket
+    if (jiraTicket) {
+      const credentials = getCredentialsFromRequest(req);
+      const { jiraApi: userJiraApi } = createApiClients(credentials);
+      
+      // Post comment if provided
+      if (jiraComment && jiraComment.body && jiraComment.body.trim()) {
+        try {
+          const commentContent = jiraComment.mentions && jiraComment.mentions.length > 0
+            ? parseMentionsToADF(jiraComment.body, jiraComment.mentions)
+            : [{ type: 'text', text: jiraComment.body }];
+          
+          await userJiraApi.post(`/rest/api/3/issue/${jiraTicket}/comment`, {
+            body: {
+              type: 'doc',
+              version: 1,
+              content: [
+                {
+                  type: 'paragraph',
+                  content: commentContent
+                }
+              ]
+            }
+          });
+        } catch (jiraError) {
+          console.error('Error posting Jira comment during move:', jiraError.response?.data || jiraError.message);
+          // Don't fail the move if comment fails, just log it
+        }
+      }
+
+      // Add labels if provided
+      if (req.body.labels && Array.isArray(req.body.labels) && req.body.labels.length > 0) {
+        try {
+          // Get current issue to merge labels
+          const currentIssue = await userJiraApi.get(`/rest/api/3/issue/${jiraTicket}`, {
+            params: { fields: 'labels' }
+          });
+          const currentLabels = currentIssue.data.fields.labels || [];
+          
+          // Merge new labels with existing ones (avoid duplicates)
+          const allLabels = [...new Set([...currentLabels, ...req.body.labels])];
+          
+          await userJiraApi.put(`/rest/api/3/issue/${jiraTicket}`, {
+            fields: {
+              labels: allLabels
+            }
+          });
+        } catch (labelError) {
+          console.error('Error adding labels during move:', labelError.response?.data || labelError.message);
+          // Don't fail the move if labels fail, just log it
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Page "${currentPage.data.title}" moved to ${targetStatusConfig.name}`,
+      page: {
+        id: response.data.id,
+        title: response.data.title,
+        newStatus: targetStatus
+      }
+    });
+  } catch (error) {
+    console.error('Error moving page:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to move page',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Helper function to parse mentions in text and convert to Jira ADF format
+function parseMentionsToADF(text, mentions) {
+  const parts = [];
+  let lastIndex = 0;
+  // Match full URLs (http:// or https://) or specific domain patterns like updates.toasttab.com
+  // URLs can have trailing punctuation which we'll strip when creating the link
+  const urlRegex = /(https?:\/\/[^\s<>"']+)|(\bupdates\.toasttab\.com[^\s<>"']*)/gi;
+  let match;
+  const mentionMap = new Map();
+  const displayNames = [];
+  
+  // Build a map of displayName -> accountId from mentions array
+  // Also build a sorted array of displayNames (longest first) for matching
+  if (mentions && Array.isArray(mentions)) {
+    mentions.forEach(m => {
+      if (m.displayName && m.accountId) {
+        // Store both exact match and lowercase for flexibility
+        mentionMap.set(m.displayName, m.accountId);
+        mentionMap.set(m.displayName.toLowerCase(), m.accountId);
+        displayNames.push(m.displayName);
+      }
+    });
+    // Sort by length (longest first) so we match "Shivani Gupta" before "Shivani"
+    displayNames.sort((a, b) => b.length - a.length);
+  }
+
+  // Collect all matches (mentions and URLs) with their positions
+  const allMatches = [];
+  
+  // Find all mentions by trying to match each displayName
+  // We need to match the full display name, not just the first word
+  let textIndex = 0;
+  while (textIndex < text.length) {
+    const atIndex = text.indexOf('@', textIndex);
+    if (atIndex === -1) break;
+    
+    // Try to match each displayName starting at this @ position
+    // Sort by length (longest first) to match "Shivani Gupta" before "Shivani"
+    let bestMatch = null;
+    for (const displayName of displayNames) {
+      // Check if the displayName matches at this position (case-insensitive)
+      // The text after @ should match the displayName, followed by space, punctuation, or end of text
+      const textAfterAt = text.substring(atIndex + 1);
+      // Escape special regex characters in displayName
+      const escapedName = displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Match the name, allowing for spaces in the name, and requiring it to end at word boundary
+      const regex = new RegExp(`^${escapedName}(?=[\\s.,!?;:)\\]}]|$)`, 'i');
+      if (regex.test(textAfterAt)) {
+        const matchedLength = displayName.length;
+        if (!bestMatch || matchedLength > bestMatch.length) {
+          bestMatch = {
+            type: 'mention',
+            index: atIndex,
+            length: matchedLength + 1, // +1 for the @
+            displayName: displayName,
+            fullMatch: `@${displayName}`
+          };
+        }
+      }
+    }
+    
+    if (bestMatch) {
+      allMatches.push(bestMatch);
+      textIndex = bestMatch.index + bestMatch.length;
+    } else {
+      // No match found, skip this @ and continue
+      textIndex = atIndex + 1;
+    }
+  }
+  
+  // Find all URLs
+  urlRegex.lastIndex = 0; // Reset regex
+  while ((match = urlRegex.exec(text)) !== null) {
+    // Skip if this URL is part of a mention (already handled)
+    const isInMention = allMatches.some(m => 
+      m.type === 'mention' && 
+      match.index >= m.index && 
+      match.index < m.index + m.length
+    );
+    
+    if (!isInMention) {
+      // Check if this URL overlaps with another URL (avoid duplicates)
+      const overlaps = allMatches.some(m => 
+        m.type === 'url' && 
+        ((match.index >= m.index && match.index < m.index + m.length) ||
+         (m.index >= match.index && m.index < match.index + match[0].length))
+      );
+      
+      if (!overlaps) {
+        allMatches.push({
+          type: 'url',
+          index: match.index,
+          length: match[0].length,
+          url: match[1] || match[2], // match[1] is full URL, match[2] is domain pattern
+          fullMatch: match[0]
+        });
+      }
+    }
+  }
+  
+  // Sort matches by position
+  allMatches.sort((a, b) => a.index - b.index);
+  
+  // Process matches in order
+  for (const matchItem of allMatches) {
+    // Add text before this match
+    if (matchItem.index > lastIndex) {
+      const textBefore = text.substring(lastIndex, matchItem.index);
+      if (textBefore) {
+        parts.push({
+          type: 'text',
+          text: textBefore
+        });
+      }
+    }
+
+    if (matchItem.type === 'mention') {
+      // Add mention
+      const displayName = matchItem.displayName;
+      const accountId = mentionMap.get(displayName) || mentionMap.get(displayName.toLowerCase());
+      
+      if (accountId) {
+        // For Jira Cloud ADF format, mentions only need the id (accountId)
+        // The text attribute is not needed and may cause issues
+        // Jira will automatically resolve the display name from the accountId
+        parts.push({
+          type: 'mention',
+          attrs: {
+            id: String(accountId)
+          }
+        });
+      } else {
+        // If we can't find the accountId, just add the text as-is (fallback)
+        parts.push({
+          type: 'text',
+          text: matchItem.fullMatch
+        });
+      }
+    } else if (matchItem.type === 'url') {
+      // Add URL as link
+      let url = matchItem.url;
+      // If it's just a domain (like updates.toasttab.com), add https://
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://' + url;
+      }
+      
+      parts.push({
+        type: 'text',
+        text: matchItem.fullMatch,
+        marks: [{
+          type: 'link',
+          attrs: {
+            href: url
+          }
+        }]
+      });
+    }
+
+    lastIndex = matchItem.index + matchItem.length;
+  }
+
+  // Add remaining text
+  if (lastIndex < text.length) {
+    const remainingText = text.substring(lastIndex);
+    if (remainingText) {
+      parts.push({
+        type: 'text',
+        text: remainingText
+      });
+    }
+  }
+
+  const result = parts.length > 0 ? parts : [{ type: 'text', text: text }];
+  
+  // Debug logging
+  if (mentions && mentions.length > 0) {
+    console.log('parseMentionsToADF - Input text:', text);
+    console.log('parseMentionsToADF - Mentions:', JSON.stringify(mentions, null, 2));
+    console.log('parseMentionsToADF - Result:', JSON.stringify(result, null, 2));
+  }
+  
+  return result;
+}
+
+// Search for Jira labels
+app.get('/api/jira/labels', async (req, res) => {
+  try {
+    const { query } = req.query;
+    const credentials = getCredentialsFromRequest(req);
+    const { jiraApi: userJiraApi } = createApiClients(credentials);
+    
+    if (!query || query.trim().length === 0) {
+      return res.json({ labels: [] });
+    }
+
+    // Search for labels using Jira's label search API
+    try {
+      const response = await userJiraApi.get('/rest/api/3/label', {
+        params: {
+          query: query,
+          maxResults: 50
+        }
+      });
+      
+      const labels = response.data.values || [];
+      res.json({ labels });
+    } catch (error) {
+      // If label search API doesn't work, try alternative approach
+      // Search issues with matching labels
+      try {
+        const searchResponse = await userJiraApi.get('/rest/api/3/search', {
+          params: {
+            jql: `labels ~ "${query}"`,
+            fields: 'labels',
+            maxResults: 100
+          }
+        });
+        
+        const labelSet = new Set();
+        searchResponse.data.issues.forEach(issue => {
+          if (issue.fields.labels) {
+            issue.fields.labels.forEach(label => {
+              if (label.toLowerCase().includes(query.toLowerCase())) {
+                labelSet.add(label);
+              }
+            });
+          }
+        });
+        
+        const labels = Array.from(labelSet).sort();
+        res.json({ labels });
+      } catch (searchError) {
+        console.error('Error searching labels:', searchError.response?.data || searchError.message);
+        res.json({ labels: [], message: 'Label search not available' });
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching labels:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch labels',
+      details: error.response?.data?.errorMessages?.join(', ') || error.message
+    });
+  }
+});
+
+// Bulk update Jira tickets (labels and comments only, no page move)
+app.post('/api/pages/bulk-update-jira', async (req, res) => {
+  try {
+    const { pageIds, jiraComment, labels } = req.body;
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi, jiraApi: userJiraApi } = createApiClients(credentials);
+
+    const results = {
+      success: [],
+      failed: [],
+      jiraComments: {
+        posted: [],
+        failed: []
+      },
+      labels: {
+        added: [],
+        failed: []
+      }
+    };
+
+    // Prepare comment content if provided
+    let commentContent = null;
+    if (jiraComment && jiraComment.body && jiraComment.body.trim()) {
+      commentContent = jiraComment.mentions && jiraComment.mentions.length > 0
+        ? parseMentionsToADF(jiraComment.body, jiraComment.mentions)
+        : [{ type: 'text', text: jiraComment.body }];
+    }
+
+    for (const pageId of pageIds) {
+      try {
+        const currentPage = await confluenceApi.get(`/rest/api/content/${pageId}`, {
+          params: {
+            expand: 'body.storage'
+          }
+        });
+
+        // Extract Jira ticket
+        const bodyContent = currentPage.data.body?.storage?.value || '';
+        const jiraTicket = extractJiraTicket(bodyContent);
+        
+        if (!jiraTicket) {
+          continue; // Skip pages without Jira tickets
+        }
+
+        // Add labels if provided
+        if (labels && Array.isArray(labels) && labels.length > 0) {
+          try {
+            const currentIssue = await userJiraApi.get(`/rest/api/3/issue/${jiraTicket}`, {
+              params: { fields: 'labels' }
+            });
+            const currentLabels = currentIssue.data.fields.labels || [];
+            const allLabels = [...new Set([...currentLabels, ...labels])];
+            
+            await userJiraApi.put(`/rest/api/3/issue/${jiraTicket}`, {
+              fields: {
+                labels: allLabels
+              }
+            });
+            results.labels.added.push({ pageId, jiraTicket });
+          } catch (labelError) {
+            console.error(`Error adding labels to ${jiraTicket}:`, labelError.response?.data || labelError.message);
+            results.labels.failed.push({ pageId, jiraTicket, error: labelError.message });
+          }
+        }
+
+        // Post comment if provided
+        if (commentContent) {
+          try {
+            await userJiraApi.post(`/rest/api/3/issue/${jiraTicket}/comment`, {
+              body: {
+                type: 'doc',
+                version: 1,
+                content: [
+                  {
+                    type: 'paragraph',
+                    content: commentContent
+                  }
+                ]
+              }
+            });
+            results.jiraComments.posted.push({ pageId, jiraTicket, title: currentPage.data.title });
+          } catch (jiraError) {
+            console.error(`Error posting comment to ${jiraTicket}:`, jiraError.response?.data || jiraError.message);
+            results.jiraComments.failed.push({ pageId, jiraTicket, error: jiraError.message });
+          }
+        }
+
+        results.success.push({ pageId, jiraTicket });
+      } catch (error) {
+        console.error(`Error processing page ${pageId}:`, error.response?.data || error.message);
+        results.failed.push({ pageId, error: error.message });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Updated ${results.success.length} Jira ticket${results.success.length !== 1 ? 's' : ''}`,
+      results
+    });
+  } catch (error) {
+    console.error('Error in bulk Jira update:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to update Jira tickets',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Bulk move pages
+app.post('/api/pages/bulk-move', async (req, res) => {
+  try {
+    const { pageIds, targetStatus, jiraComment, labels } = req.body;
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi, jiraApi: userJiraApi } = createApiClients(credentials);
+
+    const targetStatusConfig = PAGE_STATUSES[targetStatus];
+    if (!targetStatusConfig) {
+      return res.status(400).json({ error: 'Invalid target status' });
+    }
+
+    const results = {
+      success: [],
+      failed: [],
+      jiraComments: {
+        posted: [],
+        failed: []
+      }
+    };
+
+    // Prepare comment content if provided
+    let commentContent = null;
+    if (jiraComment && jiraComment.body && jiraComment.body.trim()) {
+      commentContent = jiraComment.mentions && jiraComment.mentions.length > 0
+        ? parseMentionsToADF(jiraComment.body, jiraComment.mentions)
+        : [{ type: 'text', text: jiraComment.body }];
+    }
+
+    for (const pageId of pageIds) {
+      try {
+        const currentPage = await confluenceApi.get(`/rest/api/content/${pageId}`, {
+          params: {
+            expand: 'version,body.storage'
+          }
+        });
+
+        // Move the page
+        await confluenceApi.put(`/rest/api/content/${pageId}`, {
+          id: pageId,
+          type: 'page',
+          title: currentPage.data.title,
+          version: {
+            number: currentPage.data.version.number + 1
+          },
+          ancestors: [{
+            id: targetStatusConfig.pageId
+          }],
+          body: currentPage.data.body
+        });
+
+        // Extract Jira ticket and update if needed
+        const bodyContent = currentPage.data.body?.storage?.value || '';
+        const jiraTicket = extractJiraTicket(bodyContent);
+        
+        if (jiraTicket) {
+          // Post comment if provided
+          if (commentContent) {
+            try {
+              await userJiraApi.post(`/rest/api/3/issue/${jiraTicket}/comment`, {
+                body: {
+                  type: 'doc',
+                  version: 1,
+                  content: [
+                    {
+                      type: 'paragraph',
+                      content: commentContent
+                    }
+                  ]
+                }
+              });
+              results.jiraComments.posted.push({ pageId, jiraTicket, title: currentPage.data.title });
+            } catch (jiraError) {
+              console.error(`Error posting Jira comment for ${jiraTicket}:`, jiraError.response?.data || jiraError.message);
+              results.jiraComments.failed.push({ pageId, jiraTicket, error: jiraError.message });
+            }
+          }
+
+          // Add labels if provided
+          if (labels && Array.isArray(labels) && labels.length > 0) {
+            try {
+              // Get current issue to merge labels
+              const currentIssue = await userJiraApi.get(`/rest/api/3/issue/${jiraTicket}`, {
+                params: { fields: 'labels' }
+              });
+              const currentLabels = currentIssue.data.fields.labels || [];
+              
+              // Merge new labels with existing ones (avoid duplicates)
+              const allLabels = [...new Set([...currentLabels, ...labels])];
+              
+              await userJiraApi.put(`/rest/api/3/issue/${jiraTicket}`, {
+                fields: {
+                  labels: allLabels
+                }
+              });
+            } catch (labelError) {
+              console.error(`Error adding labels to ${jiraTicket}:`, labelError.response?.data || labelError.message);
+              // Don't fail the move if labels fail, just log it
+            }
+          }
+        }
+
+        results.success.push({ id: pageId, title: currentPage.data.title });
+      } catch (e) {
+        results.failed.push({ id: pageId, error: e.message });
+      }
+    }
+
+    let message = `Moved ${results.success.length} page${results.success.length !== 1 ? 's' : ''} to ${targetStatusConfig.name}`;
+    if (commentContent && results.jiraComments.posted.length > 0) {
+      message += `. Posted comment to ${results.jiraComments.posted.length} Jira ticket${results.jiraComments.posted.length !== 1 ? 's' : ''}.`;
+    }
+    if (results.jiraComments.failed.length > 0) {
+      message += ` Failed to post comment to ${results.jiraComments.failed.length} ticket${results.jiraComments.failed.length !== 1 ? 's' : ''}.`;
+    }
+
+    res.json({
+      success: true,
+      message,
+      results
+    });
+  } catch (error) {
+    console.error('Error bulk moving pages:', error.message);
+    res.status(500).json({
+      error: 'Failed to bulk move pages',
+      details: error.message
+    });
+  }
+});
+
+// Get Jira issue details
+app.get('/api/jira/issue/:issueKey', async (req, res) => {
+  try {
+    const { issueKey } = req.params;
+    const credentials = getCredentialsFromRequest(req);
+    const { jiraApi: userJiraApi } = createApiClients(credentials);
+    
+    // Fetch issue with all fields (use * to get all fields including custom fields)
+    const response = await userJiraApi.get(`/rest/api/3/issue/${issueKey}`, {
+      params: {
+        expand: 'names'
+      }
+    });
+
+    const issue = response.data;
+    const fields = issue.fields;
+    const fieldNames = issue.names || {}; // Maps field IDs to human-readable names
+
+    // Try to get roadmap status from common custom fields
+    let roadmapStatus = null;
+    if (fields.customfield_10020) {
+      roadmapStatus = fields.customfield_10020.value || fields.customfield_10020;
+    } else if (fields.customfield_10021) {
+      roadmapStatus = fields.customfield_10021.value || fields.customfield_10021;
+    }
+
+    // Extract all custom fields dynamically
+    const customFields = {};
+    Object.keys(fields).forEach(fieldKey => {
+      if (fieldKey.startsWith('customfield_')) {
+        const fieldValue = fields[fieldKey];
+        const fieldName = fieldNames[fieldKey] || fieldKey;
+        
+        // Handle different field types
+        if (fieldValue === null || fieldValue === undefined) {
+          return; // Skip null/undefined fields
+        }
+        
+        if (Array.isArray(fieldValue)) {
+          customFields[fieldKey] = {
+            name: fieldName,
+            value: fieldValue.map(v => v.name || v.value || v),
+            raw: fieldValue
+          };
+        } else if (typeof fieldValue === 'object' && fieldValue !== null) {
+          customFields[fieldKey] = {
+            name: fieldName,
+            value: fieldValue.name || fieldValue.value || fieldValue,
+            raw: fieldValue
+          };
+        } else {
+          customFields[fieldKey] = {
+            name: fieldName,
+            value: fieldValue,
+            raw: fieldValue
+          };
+        }
+      }
+    });
+
+    res.json({
+      key: issue.key,
+      id: issue.id,
+      url: `${credentials.baseUrl.replace('/wiki', '')}/browse/${issue.key}`,
+      summary: fields.summary,
+      status: {
+        name: fields.status?.name,
+        category: fields.status?.statusCategory?.name,
+        color: fields.status?.statusCategory?.colorName
+      },
+      assignee: fields.assignee ? {
+        accountId: fields.assignee.accountId,
+        displayName: fields.assignee.displayName,
+        email: fields.assignee.emailAddress,
+        avatarUrl: fields.assignee.avatarUrls?.['48x48']
+      } : null,
+      reporter: fields.reporter ? {
+        accountId: fields.reporter.accountId,
+        displayName: fields.reporter.displayName,
+        email: fields.reporter.emailAddress,
+        avatarUrl: fields.reporter.avatarUrls?.['48x48']
+      } : null,
+      priority: fields.priority ? {
+        name: fields.priority.name,
+        iconUrl: fields.priority.iconUrl
+      } : null,
+      issueType: fields.issuetype ? {
+        name: fields.issuetype.name,
+        iconUrl: fields.issuetype.iconUrl
+      } : null,
+      created: fields.created,
+      updated: fields.updated,
+      dueDate: fields.duedate,
+      labels: fields.labels || [],
+      components: fields.components?.map(c => c.name) || [],
+      fixVersions: fields.fixVersions?.map(v => v.name) || [],
+      resolution: fields.resolution?.name || null,
+      epicKey: fields.customfield_10014, // Epic link field (may vary)
+      roadmapStatus: roadmapStatus,
+      customFields: customFields,
+      allFields: fields // Include all fields for flexibility
+    });
+  } catch (error) {
+    console.error('Error fetching Jira issue:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch Jira issue',
+      details: error.response?.data?.errorMessages?.join(', ') || error.message
+    });
+  }
+});
+
+// Get comments for a Jira issue
+app.get('/api/jira/issue/:issueKey/comments', async (req, res) => {
+  try {
+    const { issueKey } = req.params;
+    const credentials = getCredentialsFromRequest(req);
+    const { jiraApi: userJiraApi } = createApiClients(credentials);
+    
+    const response = await userJiraApi.get(`/rest/api/3/issue/${issueKey}/comment`, {
+      params: {
+        expand: 'renderedBody'
+      }
+    });
+
+    // Process comments and build thread structure
+    const comments = response.data.comments.map(comment => ({
+      id: comment.id,
+      body: comment.body?.content || [],
+      renderedBody: comment.renderedBody || '',
+      author: {
+        accountId: comment.author?.accountId,
+        displayName: comment.author?.displayName,
+        avatarUrl: comment.author?.avatarUrls?.['48x48']
+      },
+      created: comment.created,
+      updated: comment.updated,
+      parentId: comment.parent?.id || null, // Thread parent
+      jsdPublic: comment.jsdPublic || false
+    }));
+
+    // Build thread structure (group by parent)
+    const threadMap = new Map();
+    const rootComments = [];
+    
+    comments.forEach(comment => {
+      if (comment.parentId) {
+        if (!threadMap.has(comment.parentId)) {
+          threadMap.set(comment.parentId, []);
+        }
+        threadMap.get(comment.parentId).push(comment);
+      } else {
+        rootComments.push(comment);
+      }
+    });
+    
+    // Attach replies to their parents
+    const buildThread = (comment) => {
+      const replies = threadMap.get(comment.id) || [];
+      return {
+        ...comment,
+        replies: replies.map(buildThread).sort((a, b) => new Date(a.created) - new Date(b.created))
+      };
+    };
+    
+    const threadedComments = rootComments.map(buildThread).sort((a, b) => new Date(b.created) - new Date(a.created));
+
+    res.json({
+      comments: threadedComments,
+      total: comments.length
+    });
+  } catch (error) {
+    console.error('Error fetching Jira comments:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch comments',
+      details: error.response?.data?.errorMessages?.join(', ') || error.message
+    });
+  }
+});
+
+// Post a comment to a Jira issue
+app.post('/api/jira/issue/:issueKey/comment', async (req, res) => {
+  try {
+    const { issueKey } = req.params;
+    const { body, mentions, parentId } = req.body; // mentions is array of { accountId, displayName }, parentId for threading
+
+    if (!body || !body.trim()) {
+      return res.status(400).json({
+        error: 'Comment body is required'
+      });
+    }
+
+    // Get credentials from request
+    const credentials = getCredentialsFromRequest(req);
+    const { jiraApi: userJiraApi } = createApiClients(credentials);
+
+    // Always use parseMentionsToADF to handle mentions and URLs, even if mentions array is empty
+    // This ensures URLs are converted to links
+    const content = parseMentionsToADF(body, mentions || []);
+
+    // Log the comment payload for debugging
+    const commentPayload = {
+      type: 'doc',
+      version: 1,
+      content: [
+        {
+          type: 'paragraph',
+          content: content
+        }
+      ]
+    };
+    
+    // Note: Jira REST API v3 does not currently support threaded comments via the parent field
+    // The parent field causes INVALID_INPUT errors
+    // Threading support may be available in future API versions or through different endpoints
+    // For now, we'll post as a regular comment
+    // TODO: Re-enable threading when Jira API supports it
+    // if (parentId) {
+    //   commentPayload.parent = {
+    //     id: parentId
+    //   };
+    // }
+    
+    console.log('Posting Jira comment with payload:', JSON.stringify(commentPayload, null, 2));
+    console.log('Mentions array:', JSON.stringify(mentions, null, 2));
+    if (parentId) {
+      console.log('Note: parentId provided but threading not supported by Jira API v3');
+    }
+    
+    const response = await userJiraApi.post(`/rest/api/3/issue/${issueKey}/comment`, {
+      body: commentPayload
+    });
+
+    res.json({
+      success: true,
+      comment: {
+        id: response.data.id,
+        body: response.data.body
+      }
+    });
+  } catch (error) {
+    console.error('Error posting Jira comment:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to post comment',
+      details: error.response?.data?.errorMessages?.join(', ') || error.message
+    });
+  }
+});
+
+// Get current user information
+app.get('/api/user/current', async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    const { jiraApi: userJiraApi } = createApiClients(credentials);
+    
+    // Get current user from Jira API
+    const response = await userJiraApi.get('/rest/api/3/myself');
+    
+    res.json({
+      accountId: response.data.accountId,
+      displayName: response.data.displayName,
+      email: response.data.emailAddress,
+      avatarUrl: response.data.avatarUrls?.['48x48'] || null
+    });
+  } catch (error) {
+    console.error('Error fetching current user:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch current user',
+      details: error.response?.data?.errorMessages?.join(', ') || error.message
+    });
+  }
+});
+
+// Get notifications for current user (new comments on assigned pages) - uses local assignments
+app.get('/api/notifications', async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi, jiraApi: userJiraApi } = createApiClients(credentials);
+    
+    // Get last check time from query param or use 24 hours ago
+    const lastCheckTime = req.query.since 
+      ? new Date(req.query.since) 
+      : new Date(Date.now() - 24 * 60 * 60 * 1000); // Default: 24 hours ago
+    
+    // Get assigned page IDs from request (sent from client's localStorage)
+    const assignedPageIds = req.query.assignedPageIds 
+      ? JSON.parse(req.query.assignedPageIds) 
+      : [];
+    
+    // Get current user email for filtering out own comments
+    const currentUserEmail = req.headers['x-atlassian-email'] || '';
+    
+    const notifications = [];
+    
+    // Check all statuses for pages assigned to user
+    for (const [statusKey, status] of Object.entries(PAGE_STATUSES)) {
+      try {
+        const pageIdMap = {
+          draft: req.headers['x-draft-page-id'] || PAGE_STATUSES.draft.pageId,
+          inProgress: req.headers['x-in-progress-page-id'] || PAGE_STATUSES.inProgress.pageId,
+          needsAction: req.headers['x-needs-action-page-id'] || PAGE_STATUSES.needsAction.pageId,
+          published: req.headers['x-published-page-id'] || PAGE_STATUSES.published.pageId,
+          discard: req.headers['x-discard-page-id'] || PAGE_STATUSES.discard.pageId
+        };
+        
+        const parentPageId = pageIdMap[statusKey] || status.pageId;
+        
+        const response = await confluenceApi.get(`/rest/api/content/${parentPageId}/child/page`, {
+          params: {
+            expand: 'version,history,body.storage',
+            limit: 100
+          }
+        });
+
+        for (const page of response.data.results) {
+          // Only check pages that are assigned locally
+          if (assignedPageIds.includes(page.id)) {
+            const bodyContent = page.body?.storage?.value || '';
+            const jiraTicket = extractJiraTicket(bodyContent);
+            
+            // Get comments for this page
+            try {
+              const commentsResponse = await confluenceApi.get(`/rest/api/content/${page.id}/child/comment`, {
+                params: {
+                  expand: 'version,history',
+                  limit: 10,
+                  order: 'desc'
+                }
+              });
+              
+              const comments = commentsResponse.data.results || [];
+              
+              // Find new comments since last check
+              for (const comment of comments) {
+                const commentDate = new Date(comment.version?.when || comment.history?.createdDate);
+                
+                // Only include comments newer than last check and not by the current user
+                if (commentDate > lastCheckTime) {
+                  const commentAuthor = comment.version?.by?.displayName || comment.history?.createdBy?.displayName || 'Unknown';
+                  const commentAuthorEmail = comment.version?.by?.emailAddress || comment.history?.createdBy?.emailAddress;
+                  
+                  // Skip if comment is by the current user
+                  if (commentAuthorEmail && commentAuthorEmail.toLowerCase() !== currentUserEmail.toLowerCase()) {
+                    notifications.push({
+                      id: `${page.id}-${comment.id}-${commentDate.getTime()}`,
+                      type: 'comment',
+                      pageId: page.id,
+                      pageTitle: page.title,
+                      pageUrl: `${credentials.baseUrl}${page._links.webui}`,
+                      jiraTicket: jiraTicket,
+                      jiraUrl: jiraTicket ? `${credentials.baseUrl.replace('/wiki', '')}/browse/${jiraTicket}` : null,
+                      commentId: comment.id,
+                      commentAuthor: commentAuthor,
+                      commentDate: commentDate.toISOString(),
+                      commentDaysAgo: daysAgo(commentDate.toISOString()),
+                      status: statusKey,
+                      statusName: status.name,
+                      statusIcon: status.icon,
+                      timestamp: commentDate.toISOString()
+                    });
+                  }
+                }
+              }
+            } catch (commentError) {
+              // Skip pages where we can't fetch comments
+              console.log(`Could not fetch comments for page ${page.id}:`, commentError.message);
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`Could not fetch pages for status ${statusKey}:`, e.message);
+      }
+    }
+
+    // Sort notifications by date (newest first)
+    notifications.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    res.json({
+      notifications,
+      count: notifications.length,
+      lastCheck: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error fetching notifications:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch notifications',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Get pages assigned to current user (My Tasks) - uses local assignments from client
+app.get('/api/pages/my-tasks', async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi } = createApiClients(credentials);
+    
+    // Get assigned page IDs from request (sent from client's localStorage)
+    const assignedPageIds = req.query.assignedPageIds 
+      ? JSON.parse(req.query.assignedPageIds) 
+      : [];
+    
+    if (assignedPageIds.length === 0) {
+      return res.json({
+        pages: [],
+        pagesByStatus: {},
+        total: 0
+      });
+    }
+    
+    // Get all pages across all statuses
+    const allPages = [];
+    
+    for (const [statusKey, status] of Object.entries(PAGE_STATUSES)) {
+      try {
+        const pageIdMap = {
+          draft: req.headers['x-draft-page-id'] || PAGE_STATUSES.draft.pageId,
+          inProgress: req.headers['x-in-progress-page-id'] || PAGE_STATUSES.inProgress.pageId,
+          needsAction: req.headers['x-needs-action-page-id'] || PAGE_STATUSES.needsAction.pageId,
+          published: req.headers['x-published-page-id'] || PAGE_STATUSES.published.pageId,
+          discard: req.headers['x-discard-page-id'] || PAGE_STATUSES.discard.pageId
+        };
+        
+        const parentPageId = pageIdMap[statusKey] || status.pageId;
+        
+        const response = await confluenceApi.get(`/rest/api/content/${parentPageId}/child/page`, {
+          params: {
+            expand: 'version,history,metadata.labels,body.storage',
+            limit: 100
+          }
+        });
+
+        for (const page of response.data.results) {
+          // Only include pages that are in the assigned list
+          if (assignedPageIds.includes(page.id)) {
+            const bodyContent = page.body?.storage?.value || '';
+            const jiraTicket = extractJiraTicket(bodyContent);
+            
+            // Get last comment
+            let lastComment = null;
+            let commentCount = 0;
+            
+            try {
+              const commentsResponse = await confluenceApi.get(`/rest/api/content/${page.id}/child/comment`, {
+                params: {
+                  expand: 'version,history',
+                  limit: 1,
+                  order: 'desc'
+                }
+              });
+              
+              commentCount = commentsResponse.data.size || 0;
+              if (commentsResponse.data.results && commentsResponse.data.results.length > 0) {
+                const comment = commentsResponse.data.results[0];
+                lastComment = {
+                  id: comment.id,
+                  date: comment.version?.when || comment.history?.createdDate,
+                  author: comment.version?.by?.displayName || comment.history?.createdBy?.displayName
+                };
+              }
+            } catch (e) {
+              // Silently fail for comments
+            }
+
+            const createdDate = page.history?.createdDate;
+            const lastModified = page.version?.when;
+            
+            let lastActivityDate = lastModified;
+            if (lastComment && lastComment.date) {
+              const commentDate = new Date(lastComment.date);
+              const modifiedDate = new Date(lastModified);
+              if (commentDate > modifiedDate) {
+                lastActivityDate = lastComment.date;
+              }
+            }
+
+            allPages.push({
+              id: page.id,
+              title: page.title,
+              url: `${credentials.baseUrl}${page._links.webui}`,
+              status: statusKey,
+              createdDate,
+              createdDaysAgo: daysAgo(createdDate),
+              lastModified,
+              lastModifiedDaysAgo: daysAgo(lastModified),
+              lastActivityDate,
+              lastActivityDaysAgo: daysAgo(lastActivityDate),
+              lastComment,
+              lastCommentDaysAgo: lastComment ? daysAgo(lastComment.date) : null,
+              commentCount,
+              version: page.version?.number,
+              author: page.history?.createdBy?.displayName,
+              labels: page.metadata?.labels?.results?.map(l => l.name) || [],
+              isStale: status.staleThreshold 
+                ? daysAgo(lastActivityDate) >= status.staleThreshold 
+                : false,
+              jiraTicket: jiraTicket,
+              jiraUrl: jiraTicket ? `${credentials.baseUrl.replace('/wiki', '')}/browse/${jiraTicket}` : null
+            });
+          }
+        }
+      } catch (e) {
+        console.log(`Could not fetch pages for status ${statusKey}:`, e.message);
+      }
+    }
+
+    // Group pages by status
+    const pagesByStatus = {};
+    for (const [statusKey] of Object.entries(PAGE_STATUSES)) {
+      pagesByStatus[statusKey] = allPages.filter(p => p.status === statusKey);
+    }
+
+    res.json({
+      pages: allPages,
+      pagesByStatus,
+      total: allPages.length
+    });
+  } catch (error) {
+    console.error('Error fetching my tasks:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch my tasks',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Search for users (for @mentions)
+app.get('/api/users/search', async (req, res) => {
+  const query = req.query.q || '';
+  
+  if (query.length < 2) {
+    return res.json({ users: [] });
+  }
+
+  // Try multiple API approaches since Atlassian has different endpoints
+  const approaches = [
+    // Approach 1: Atlassian user picker API (most reliable for @mentions)
+    async () => {
+      const response = await jiraApi.get('/rest/api/3/user/picker', {
+        params: {
+          query: query,
+          maxResults: 10
+        }
+      });
+      return response.data.users?.map(user => ({
+        accountId: user.accountId,
+        displayName: user.displayName,
+        email: user.emailAddress || null,
+        avatarUrl: user.avatarUrl || null
+      })) || [];
+    },
+    
+    // Approach 2: Jira user search
+    async () => {
+      const response = await jiraApi.get('/rest/api/3/user/search', {
+        params: {
+          query: query,
+          maxResults: 10
+        }
+      });
+      return response.data?.map(user => ({
+        accountId: user.accountId,
+        displayName: user.displayName,
+        email: user.emailAddress || null,
+        avatarUrl: user.avatarUrls?.['48x48'] || null
+      })) || [];
+    },
+    
+    // Approach 3: Confluence user search with CQL
+    async () => {
+      const response = await confluenceApi.get('/rest/api/search', {
+        params: {
+          cql: `type=user AND (user.fullname~"${query}" OR title~"${query}")`,
+          limit: 10
+        }
+      });
+      return response.data.results?.map(result => ({
+        accountId: result.user?.accountId,
+        displayName: result.user?.displayName || result.title,
+        email: result.user?.email || null,
+        avatarUrl: result.user?.profilePicture?.path 
+          ? `${process.env.CONFLUENCE_BASE_URL}${result.user.profilePicture.path}`
+          : null
+      })).filter(u => u.accountId) || [];
+    },
+
+    // Approach 4: Atlassian user search (assignable users)
+    async () => {
+      const response = await jiraApi.get('/rest/api/3/user/assignable/search', {
+        params: {
+          query: query,
+          maxResults: 10
+        }
+      });
+      return response.data?.map(user => ({
+        accountId: user.accountId,
+        displayName: user.displayName,
+        email: user.emailAddress || null,
+        avatarUrl: user.avatarUrls?.['48x48'] || null
+      })) || [];
+    }
+  ];
+
+  for (let i = 0; i < approaches.length; i++) {
+    try {
+      const users = await approaches[i]();
+      if (users && users.length > 0) {
+        console.log(`User search succeeded with approach ${i + 1}`);
+        return res.json({ users });
+      }
+    } catch (error) {
+      console.log(`User search approach ${i + 1} failed:`, error.response?.status, error.response?.data?.message || error.message);
+      // Continue to next approach
+    }
+  }
+
+  // If all approaches fail, return empty
+  console.log('All user search approaches failed for query:', query);
+  res.json({ users: [], message: 'User search not available' });
+});
+
+// Get a specific page's details
+app.get('/api/pages/:pageId', async (req, res) => {
+  try {
+    const { pageId } = req.params;
+    
+    const response = await confluenceApi.get(`/rest/api/content/${pageId}`, {
+      params: {
+        expand: 'version,history,body.view,metadata.labels,ancestors'
+      }
+    });
+
+    const page = response.data;
+    
+    // Determine current status based on parent
+    let currentStatus = null;
+    if (page.ancestors && page.ancestors.length > 0) {
+      const parentId = page.ancestors[page.ancestors.length - 1].id;
+      for (const [key, status] of Object.entries(PAGE_STATUSES)) {
+        if (status.pageId === parentId) {
+          currentStatus = key;
+          break;
+        }
+      }
+    }
+    
+    res.json({
+      id: page.id,
+      title: page.title,
+      url: `${process.env.CONFLUENCE_BASE_URL}${page._links.webui}`,
+      body: page.body?.view?.value,
+      status: currentStatus,
+      createdDate: page.history?.createdDate,
+      createdDaysAgo: daysAgo(page.history?.createdDate),
+      lastModified: page.version?.when,
+      lastModifiedDaysAgo: daysAgo(page.version?.when),
+      version: page.version?.number,
+      author: page.history?.createdBy?.displayName,
+      labels: page.metadata?.labels?.results?.map(l => l.name) || [],
+      ancestors: page.ancestors?.map(a => ({ id: a.id, title: a.title })) || []
+    });
+  } catch (error) {
+    console.error('Error fetching page:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch page',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Get page content for LaunchNotes import
+app.get('/api/pages/:pageId/content', async (req, res) => {
+  try {
+    const { pageId } = req.params;
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi } = createApiClients(credentials);
+    const response = await confluenceApi.get(`/rest/api/content/${pageId}`, {
+      params: { expand: 'body.storage,body.view,version,history' }
+    });
+    const page = response.data;
+    const bodyStorage = page.body?.storage?.value || '';
+    const bodyView = page.body?.view?.value || '';
+    res.json({
+      id: page.id,
+      title: page.title,
+      bodyStorage: bodyStorage,
+      bodyView: bodyView,
+      version: page.version?.number,
+      created: page.history?.createdDate,
+      modified: page.version?.when,
+      author: page.history?.createdBy?.displayName,
+      url: `${credentials.baseUrl}${page._links.webui}`
+    });
+  } catch (error) {
+    console.error('Error fetching page content:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to fetch page content',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Serve static files in production or when running in Electron
+const isElectron = process.env.ELECTRON_RUN_AS_NODE !== undefined || process.versions.electron !== undefined;
+if (process.env.NODE_ENV === 'production' || isElectron) {
+  const buildPath = path.join(__dirname, '../client/build');
+  app.use(express.static(buildPath));
+  
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(buildPath, 'index.html'));
+  });
+}
+
+// Helper function to convert Confluence storage format to plain text
+function convertConfluenceToText(htmlContent) {
+  if (!htmlContent) return '';
+  
+  let text = htmlContent;
+  
+  // Remove Confluence-specific macros and their content
+  text = text.replace(/<ac:structured-macro[^>]*>[\s\S]*?<\/ac:structured-macro>/gi, '');
+  text = text.replace(/<ac:inline-comment-marker[^>]*>[\s\S]*?<\/ac:inline-comment-marker>/gi, '');
+  text = text.replace(/<ac:parameter[^>]*>[\s\S]*?<\/ac:parameter>/gi, '');
+  
+  // Remove other Confluence-specific tags but keep their text content
+  text = text.replace(/<ac:[^>]*>/gi, '');
+  text = text.replace(/<\/ac:[^>]*>/gi, '');
+  
+  // Remove HTML comments
+  text = text.replace(/<!--[\s\S]*?-->/g, '');
+  
+  // Convert headings
+  text = text.replace(/<h1[^>]*>/gi, '\n\n# ');
+  text = text.replace(/<h2[^>]*>/gi, '\n\n## ');
+  text = text.replace(/<h3[^>]*>/gi, '\n\n### ');
+  text = text.replace(/<h4[^>]*>/gi, '\n\n#### ');
+  text = text.replace(/<h5[^>]*>/gi, '\n\n##### ');
+  text = text.replace(/<h6[^>]*>/gi, '\n\n###### ');
+  text = text.replace(/<\/h[1-6]>/gi, '\n');
+  
+  // Convert paragraphs
+  text = text.replace(/<p[^>]*>/gi, '\n\n');
+  text = text.replace(/<\/p>/gi, '');
+  
+  // Convert line breaks
+  text = text.replace(/<br\s*\/?>/gi, '\n');
+  text = text.replace(/<hr[^>]*>/gi, '\n\n---\n\n');
+  
+  // Convert lists
+  text = text.replace(/<ul[^>]*>/gi, '\n');
+  text = text.replace(/<\/ul>/gi, '\n');
+  text = text.replace(/<ol[^>]*>/gi, '\n');
+  text = text.replace(/<\/ol>/gi, '\n');
+  text = text.replace(/<li[^>]*>/gi, '• ');
+  text = text.replace(/<\/li>/gi, '\n');
+  
+  // Convert emphasis
+  text = text.replace(/<strong[^>]*>/gi, '**');
+  text = text.replace(/<\/strong>/gi, '**');
+  text = text.replace(/<b[^>]*>/gi, '**');
+  text = text.replace(/<\/b>/gi, '**');
+  text = text.replace(/<em[^>]*>/gi, '*');
+  text = text.replace(/<\/em>/gi, '*');
+  text = text.replace(/<i[^>]*>/gi, '*');
+  text = text.replace(/<\/i>/gi, '*');
+  
+  // Convert links - extract href and text
+  text = text.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi, '$2 ($1)');
+  text = text.replace(/<a[^>]*>([^<]*)<\/a>/gi, '$1');
+  
+  // Convert code blocks
+  text = text.replace(/<pre[^>]*>/gi, '\n```\n');
+  text = text.replace(/<\/pre>/gi, '\n```\n');
+  text = text.replace(/<code[^>]*>/gi, '`');
+  text = text.replace(/<\/code>/gi, '`');
+  
+  // Remove all remaining HTML tags
+  text = text.replace(/<[^>]+>/g, '');
+  
+  // Decode HTML entities
+  text = text.replace(/&nbsp;/g, ' ');
+  text = text.replace(/&amp;/g, '&');
+  text = text.replace(/&lt;/g, '<');
+  text = text.replace(/&gt;/g, '>');
+  text = text.replace(/&quot;/g, '"');
+  text = text.replace(/&#39;/g, "'");
+  text = text.replace(/&trade;/g, '™');
+  text = text.replace(/&copy;/g, '©');
+  text = text.replace(/&reg;/g, '®');
+  
+  // Clean up whitespace
+  text = text.replace(/\n{3,}/g, '\n\n'); // Max 2 consecutive newlines
+  text = text.replace(/[ \t]+/g, ' '); // Multiple spaces to single space
+  text = text.replace(/^\s+|\s+$/gm, ''); // Trim each line
+  
+  return text.trim();
+}
+
+// Helper function to extract selected sections from Confluence content
+function extractSections(htmlContent, sectionIds) {
+  if (!htmlContent || !sectionIds || sectionIds.length === 0) {
+    return htmlContent;
+  }
+  
+  // This is a simplified implementation
+  // For a full implementation, you'd need to parse the HTML structure
+  // and extract elements by their IDs or other identifiers
+  // For now, return the full content
+  return htmlContent;
+}
+// Create LaunchNotes draft from Confluence page
+app.post('/api/launchnotes/create-draft', async (req, res) => {
+  let graphqlEndpoint = null;
+    console.log('[LaunchNotes] Starting request processing...');
+
+  try {
+    const { pageId, content, title, selectedSections } = req.body;
+    console.log('[LaunchNotes] Getting credentials...');
+    console.log('[LaunchNotes] Request body parsed:', { pageId, hasContent: !!content, hasTitle: !!title });
+
+    const credentials = getCredentialsFromRequest(req);
+
+
+    console.log('[LaunchNotes] Credentials obtained');
+    console.log('[LaunchNotes] Request received:', { pageId, hasContent: !!content, hasTitle: !!title });
+    const launchnotesApiUrl = req.headers['x-launchnotes-api-url'] || req.headers['X-Launchnotes-Api-Url'] || process.env.LAUNCHNOTES_API_URL;
+    console.log('[LaunchNotes] Extracting LaunchNotes credentials from headers...');
+
+    const launchnotesApiKey = req.headers['x-launchnotes-api-key'] || req.headers['X-Launchnotes-Api-Key'] || process.env.LAUNCHNOTES_API_KEY;
+    const launchnotesProjectId = req.headers['x-launchnotes-project-id'] || req.headers['X-Launchnotes-Project-Id'] || process.env.LAUNCHNOTES_PROJECT_ID;
+    console.log('[LaunchNotes] Checking credentials...');
+
+    if (!launchnotesApiUrl || !launchnotesApiKey) {
+      return res.status(400).json({ error: 'LaunchNotes API credentials not configured', details: 'Please configure LaunchNotes API URL and API Key in settings' });
+    }
+    console.log('[LaunchNotes] Processing content...');
+
+    if (!launchnotesProjectId) {
+      return res.status(400).json({ error: 'LaunchNotes Project ID not configured', details: 'Please configure LaunchNotes Project ID in settings.' });
+    }
+    let pageTitle = title;
+    let pageContent = content;
+    if (!pageContent && pageId) {
+      const { confluenceApi } = createApiClients(credentials);
+      const pageResponse = await confluenceApi.get(`/rest/api/content/${pageId}`, { params: { expand: 'body.storage,version,history' } });
+      const page = pageResponse.data;
+      pageTitle = pageTitle || page.title;
+      pageContent = page.body?.storage?.value || '';
+    }
+    let processedContent = pageContent;
+    if (selectedSections && selectedSections.length > 0) {
+      processedContent = extractSections(pageContent, selectedSections);
+    }
+    console.log('[LaunchNotes] Converting content to plain text...');
+    const plainText = convertConfluenceToText(processedContent);
+
+    console.log('[LaunchNotes] Plain text conversion complete, length:', plainText?.length || 0);
+    console.log('[LaunchNotes] Building GraphQL endpoint...');
+
+
+
+    graphqlEndpoint = launchnotesApiUrl;
+    if (!graphqlEndpoint || graphqlEndpoint === 'https://app.launchnotes.io' || graphqlEndpoint === 'app.launchnotes.io') {
+      graphqlEndpoint = 'https://app.launchnotes.io/graphql';
+    } else {
+      if (!graphqlEndpoint.endsWith('/graphql')) {
+        if (!graphqlEndpoint.startsWith('http://') && !graphqlEndpoint.startsWith('https://')) {
+          graphqlEndpoint = `https://${graphqlEndpoint}`;
+        }
+        graphqlEndpoint = `${graphqlEndpoint.replace(/\/$/, '')}/graphql`;
+      }
+    }
+    console.log('[LaunchNotes] GraphQL endpoint built:', graphqlEndpoint);
+    console.log('[LaunchNotes] Project ID trimmed:', trimmedProjectId);
+
+    const trimmedProjectId = launchnotesProjectId?.trim();
+    console.log('[LaunchNotes] Preparing GraphQL mutation...');
+
+    if (!trimmedProjectId) {
+    console.log('[LaunchNotes] Sending GraphQL create mutation...');
+
+      return res.status(400).json({ error: 'LaunchNotes Project ID is required', details: 'Project ID cannot be empty' });
+    }
+    const createMutationWithInline = `mutation CreateDraftAnnouncement { createAnnouncement(input: { announcement: { projectId: "${trimmedProjectId}" } }) { announcement { id headline } errors { message path } } }`;
+    const createMutation = `mutation CreateDraftAnnouncement($projectId: ID!) { createAnnouncement(input: { announcement: { projectId: $projectId } }) { announcement { id headline } errors { message path } } }`;
+    let requestPayload = { query: createMutationWithInline.trim() };
+    let createResponse;
+    try {
+      createResponse = await axios.post(graphqlEndpoint, requestPayload, { headers: { 'Authorization': `Bearer ${launchnotesApiKey}`, 'Content-Type': 'application/json' } });
+      if (createResponse.data.errors && createResponse.data.errors.length > 0) {
+        requestPayload = { query: createMutation.trim(), variables: { projectId: String(trimmedProjectId).trim() } };
+        createResponse = await axios.post(graphqlEndpoint, requestPayload, { headers: { 'Authorization': `Bearer ${launchnotesApiKey}`, 'Content-Type': 'application/json' } });
+      }
+    } catch (error) {
+      requestPayload = { query: createMutation.trim(), variables: { projectId: String(trimmedProjectId).trim() } };
+      createResponse = await axios.post(graphqlEndpoint, requestPayload, { headers: { 'Authorization': `Bearer ${launchnotesApiKey}`, 'Content-Type': 'application/json' } });
+    }
+    if (createResponse.data.errors) {
+      return res.status(400).json({ error: 'Failed to create LaunchNotes draft', details: createResponse.data.errors.map(e => e.message || JSON.stringify(e)).join(', ') });
+    }
+    const createResult = createResponse.data.data?.createAnnouncement;
+    if (createResult?.errors && createResult.errors.length > 0) {
+      return res.status(400).json({ error: 'Failed to create LaunchNotes draft', details: createResult.errors.map(e => e.message || JSON.stringify(e)).join(', ') });
+    }
+    const announcement = createResult?.announcement;
+    if (!announcement || !announcement.id) {
+      return res.status(500).json({ error: 'Failed to create LaunchNotes draft', details: 'No announcement ID returned from API.' });
+    }
+    const announcementId = announcement.id;
+    if (pageTitle || plainText) {
+      const updateMutation = `mutation UpdateAnnouncement($announcement: UpdateAnnouncementAttributes!) { updateAnnouncement(input: { announcement: $announcement }) { announcement { id headline } errors { message path } } }`;
+      const updateVariables = { announcement: { id: announcementId } };
+      if (pageTitle) updateVariables.announcement.headline = pageTitle;
+      if (plainText) updateVariables.announcement.body = plainText;
+      await axios.post(graphqlEndpoint, { query: updateMutation.trim(), variables: updateVariables }, { headers: { 'Authorization': `Bearer ${launchnotesApiKey}`, 'Content-Type': 'application/json' } });
+    }
+    res.json({ success: true, announcementId: announcementId, message: 'LaunchNotes draft created successfully' });
+  } catch (error) {
+    console.error('[LaunchNotes] Error creating draft:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to create LaunchNotes draft', details: error.response?.data?.message || error.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`
+╔════════════════════════════════════════════════════════════╗
+║       Confluence Release Manager Server Running            ║
+╠════════════════════════════════════════════════════════════╣
+║  Server:  http://localhost:${PORT}                            ║
+║  API:     http://localhost:${PORT}/api                        ║
+╠════════════════════════════════════════════════════════════╣
+║  Statuses configured:                                      ║
+║    📝 Draft:        ${PAGE_STATUSES.draft.pageId.padEnd(20)}       ║
+║    🔄 In Progress:  ${PAGE_STATUSES.inProgress.pageId.padEnd(20)}       ║
+║    ⚡ Needs Action: ${PAGE_STATUSES.needsAction.pageId.padEnd(20)}       ║
+║    ✅ Published:    ${PAGE_STATUSES.published.pageId.padEnd(20)}       ║
+║    🗑️  Discarded:    ${PAGE_STATUSES.discard.pageId.padEnd(20)}       ║
+╚════════════════════════════════════════════════════════════╝
+  `);
+});

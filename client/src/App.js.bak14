@@ -1,0 +1,4763 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import './App.css';
+import SettingsModal from './SettingsModal';
+import { authenticatedFetch, hasCredentials, getCredentials, shouldShowField, getDebugLogs, clearDebugLogs } from './api';
+
+// Theme options
+const THEMES = [
+  { id: 'dim', name: 'Dim', icon: '🌙' },
+  { id: 'dark', name: 'Dark', icon: '🌑' },
+  { id: 'light', name: 'Light', icon: '☀️' }
+];
+
+// Notification Bell Component
+const NotificationBell = ({ notifications, readNotificationIds, onClick, loading }) => {
+  const unreadCount = notifications.filter(n => !readNotificationIds.has(n.id)).length;
+  
+  return (
+    <div className="notification-bell-container">
+      <button
+        className="notification-bell-btn"
+        onClick={onClick}
+        title={unreadCount > 0 ? `${unreadCount} unread notification${unreadCount !== 1 ? 's' : ''}` : 'Notifications'}
+      >
+        {loading ? (
+          <span className="spinner-small"></span>
+        ) : (
+          <>
+            🔔
+            {unreadCount > 0 && (
+              <span className="notification-badge">{unreadCount > 99 ? '99+' : unreadCount}</span>
+            )}
+          </>
+        )}
+      </button>
+    </div>
+  );
+};
+
+// Notification Panel Component
+const NotificationPanel = ({ 
+  notifications, 
+  readNotificationIds, 
+  onClose, 
+  onNotificationClick,
+  onMarkRead,
+  onMarkAllRead,
+  onClearAll,
+  statuses
+}) => {
+  const unreadNotifications = notifications.filter(n => !readNotificationIds.has(n.id));
+  const readNotifications = notifications.filter(n => readNotificationIds.has(n.id));
+  
+  const handleNotificationClick = (notification) => {
+    onMarkRead(notification.id);
+    onNotificationClick(notification);
+    onClose();
+  };
+
+  return (
+    <div className="notification-panel-overlay" onClick={onClose}>
+      <div className="notification-panel" onClick={e => e.stopPropagation()}>
+        <div className="notification-panel-header">
+          <h3>Notifications</h3>
+          <div className="notification-panel-actions">
+            {unreadNotifications.length > 0 && (
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={onMarkAllRead}
+                title="Mark all as read"
+              >
+                Mark all read
+              </button>
+            )}
+            {notifications.length > 0 && (
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={onClearAll}
+                title="Clear all notifications"
+              >
+                Clear all
+              </button>
+            )}
+            <button className="close-btn" onClick={onClose}>×</button>
+          </div>
+        </div>
+        
+        <div className="notification-panel-body">
+          {notifications.length === 0 ? (
+            <div className="notification-empty">
+              <span className="notification-empty-icon">🔔</span>
+              <p>No notifications</p>
+              <span className="notification-empty-hint">You'll be notified when someone comments on your assigned release notes</span>
+            </div>
+          ) : (
+            <>
+              {unreadNotifications.length > 0 && (
+                <div className="notification-section">
+                  <div className="notification-section-header">
+                    <span className="notification-section-title">New</span>
+                    <span className="notification-section-count">{unreadNotifications.length}</span>
+                  </div>
+                  <div className="notification-list">
+                    {unreadNotifications.map(notification => (
+                      <div
+                        key={notification.id}
+                        className="notification-item unread"
+                        onClick={() => handleNotificationClick(notification)}
+                      >
+                        <div className="notification-icon">
+                          {statuses[notification.status]?.icon || '📄'}
+                        </div>
+                        <div className="notification-content">
+                          <div className="notification-title">
+                            New comment on "{notification.pageTitle}"
+                          </div>
+                          <div className="notification-meta">
+                            <span className="notification-author">{notification.commentAuthor}</span>
+                            <span className="notification-separator">•</span>
+                            <span className="notification-time">
+                              {notification.commentDaysAgo === 0 
+                                ? 'just now' 
+                                : `${notification.commentDaysAgo} day${notification.commentDaysAgo !== 1 ? 's' : ''} ago`}
+                            </span>
+                          </div>
+                          <div className="notification-status">
+                            <span className="notification-status-badge" style={{ 
+                              '--status-color': statuses[notification.status]?.color 
+                            }}>
+                              {statuses[notification.status]?.icon} {statuses[notification.status]?.name}
+                            </span>
+                            {notification.jiraTicket && (
+                              <span className="notification-jira-ticket">
+                                🎫 {notification.jiraTicket}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
+              {readNotifications.length > 0 && (
+                <div className="notification-section">
+                  <div className="notification-section-header">
+                    <span className="notification-section-title">Earlier</span>
+                    <span className="notification-section-count">{readNotifications.length}</span>
+                  </div>
+                  <div className="notification-list">
+                    {readNotifications.slice(0, 10).map(notification => (
+                      <div
+                        key={notification.id}
+                        className="notification-item read"
+                        onClick={() => handleNotificationClick(notification)}
+                      >
+                        <div className="notification-icon">
+                          {statuses[notification.status]?.icon || '📄'}
+                        </div>
+                        <div className="notification-content">
+                          <div className="notification-title">
+                            Comment on "{notification.pageTitle}"
+                          </div>
+                          <div className="notification-meta">
+                            <span className="notification-author">{notification.commentAuthor}</span>
+                            <span className="notification-separator">•</span>
+                            <span className="notification-time">
+                              {notification.commentDaysAgo === 0 
+                                ? 'just now' 
+                                : `${notification.commentDaysAgo} day${notification.commentDaysAgo !== 1 ? 's' : ''} ago`}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Theme picker component
+const ThemePicker = () => {
+  const [theme, setTheme] = useState(() => {
+    return localStorage.getItem('theme') || 'dim';
+  });
+  const [isOpen, setIsOpen] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  const currentTheme = THEMES.find(t => t.id === theme);
+
+  return (
+    <div className="theme-picker">
+      <button 
+        className="theme-picker-btn"
+        onClick={() => setIsOpen(!isOpen)}
+        title="Change theme"
+      >
+        {currentTheme?.icon}
+      </button>
+      {isOpen && (
+        <>
+          <div className="overflow-backdrop" onClick={() => setIsOpen(false)} />
+          <div className="theme-dropdown">
+            {THEMES.map(t => (
+              <button
+                key={t.id}
+                className={`theme-option ${theme === t.id ? 'active' : ''}`}
+                onClick={() => { setTheme(t.id); setIsOpen(false); }}
+              >
+                <span className="theme-icon">{t.icon}</span>
+                <span>{t.name}</span>
+                {theme === t.id && <span className="theme-check">✓</span>}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+// Status badge component
+const StatusBadge = ({ days, threshold = 30 }) => {
+  if (days === null || days === undefined) return <span className="status-badge neutral">—</span>;
+  
+  const isStale = threshold && days >= threshold;
+  const isWarning = threshold && days >= threshold * 0.7 && days < threshold;
+  
+  let className = 'status-badge';
+  if (isStale) className += ' stale';
+  else if (isWarning) className += ' warning';
+  else className += ' fresh';
+  
+  return (
+    <span className={className}>
+      {days} {days === 1 ? 'day' : 'days'}
+    </span>
+  );
+};
+
+// Jira status color mapping
+const getStatusColor = (category) => {
+  switch (category?.toLowerCase()) {
+    case 'done': return '#10b981';
+    case 'in progress': return '#3b82f6';
+    case 'to do': return '#64748b';
+    default: return '#6366f1';
+  }
+};
+
+// Page Detail Panel component
+const PageDetailPanel = ({ page, onClose, statuses, currentStatus, onMove, onViewComments, onAddComment, onViewJiraComments, isAssigned, onAssign, onUnassign, onAddToLaunchNotes }) => {
+  const [jiraData, setJiraData] = useState(null);
+  const [jiraLoading, setJiraLoading] = useState(false);
+  const [jiraError, setJiraError] = useState(null);
+  const [pageBody, setPageBody] = useState(null);
+  const [pageBodyLoading, setPageBodyLoading] = useState(false);
+  const [showPageBody, setShowPageBody] = useState(false);
+
+  useEffect(() => {
+    if (page?.jiraTicket) {
+      setJiraLoading(true);
+      setJiraError(null);
+      authenticatedFetch(`/api/jira/issue/${page.jiraTicket}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            setJiraError(data.details || data.error);
+          } else {
+            setJiraData(data);
+          }
+        })
+        .catch(err => setJiraError(err.message))
+        .finally(() => setJiraLoading(false));
+    } else {
+      setJiraData(null);
+    }
+  }, [page?.jiraTicket]);
+
+  const fetchPageBody = useCallback(async () => {
+    if (pageBody !== null) {
+      setShowPageBody(!showPageBody);
+      return;
+    }
+    
+    setPageBodyLoading(true);
+    try {
+      const response = await authenticatedFetch(`/api/pages/${page.id}`);
+      const data = await response.json();
+      if (data.error) {
+        setPageBody('<p>Error loading page content</p>');
+      } else {
+        setPageBody(data.body || '<p>No content available</p>');
+        setShowPageBody(true);
+      }
+    } catch (err) {
+      setPageBody('<p>Error loading page content</p>');
+      setShowPageBody(true);
+    } finally {
+      setPageBodyLoading(false);
+    }
+  }, [page?.id, pageBody, showPageBody]);
+
+  if (!page) return null;
+
+  return (
+    <div className="detail-panel-overlay" onClick={onClose}>
+      <div className="detail-panel" onClick={e => e.stopPropagation()}>
+        <div className="detail-panel-header">
+          <h2>{page.title}</h2>
+          <button className="close-btn" onClick={onClose}>×</button>
+        </div>
+
+        <div className="detail-panel-content">
+          {/* Assignment */}
+          <section className="detail-section detail-section-small">
+            <h3>📌 Assignment</h3>
+            {isAssigned ? (
+              <div className="assignment-status">
+                <span className="assignment-badge assigned">✅ Assigned to you</span>
+                <button 
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => onUnassign(page.id)}
+                >
+                  Unassign
+                </button>
+              </div>
+            ) : (
+              <div className="assignment-status">
+                <span className="assignment-badge unassigned">Not assigned</span>
+                <button 
+                  className="btn btn-primary btn-sm"
+                  onClick={() => onAssign(page.id)}
+                >
+                  ➕ Assign to Me
+                </button>
+              </div>
+            )}
+          </section>
+
+          {/* Confluence Info */}
+          <section className="detail-section">
+            <h3>📄 Confluence Page</h3>
+            <div className="detail-grid">
+              <div className="detail-item">
+                <span className="detail-label">Author</span>
+                <span className="detail-value">{page.author}</span>
+              </div>
+              <div className="detail-item">
+                <span className="detail-label">Created</span>
+                <span className="detail-value">{page.createdDaysAgo} days ago</span>
+              </div>
+              <div className="detail-item">
+                <span className="detail-label">Last Activity</span>
+                <span className="detail-value">
+                  <StatusBadge days={page.lastActivityDaysAgo} threshold={30} />
+                </span>
+              </div>
+              <div className="detail-item">
+                <span className="detail-label">Comments</span>
+                <span className="detail-value">{page.commentCount || 0}</span>
+              </div>
+            </div>
+            <div className="detail-actions">
+              <a href={page.url} target="_blank" rel="noopener noreferrer" className="btn btn-primary">
+                Open in Confluence →
+              </a>
+              <button className="btn btn-secondary" onClick={() => onViewComments(page)}>
+                💬 Confluence Comments
+              </button>
+            </div>
+            
+            {/* Page Body */}
+            <div className="page-body-section">
+              <button 
+                className="btn btn-secondary btn-sm"
+                onClick={fetchPageBody}
+                disabled={pageBodyLoading}
+              >
+                {pageBodyLoading ? (
+                  <>Loading...</>
+                ) : showPageBody ? (
+                  <>▼ Hide Page Content</>
+                ) : (
+                  <>▶ Show Page Content</>
+                )}
+              </button>
+              {showPageBody && pageBody && (
+                <div 
+                  className="page-body-content"
+                  dangerouslySetInnerHTML={{ __html: pageBody }}
+                />
+              )}
+            </div>
+          </section>
+
+          {/* Jira Ticket Info */}
+          <section className="detail-section">
+            <h3>🎫 Jira Ticket</h3>
+            {!page.jiraTicket ? (
+              <div className="detail-empty">
+                <span>No Reference Ticket found in page</span>
+              </div>
+            ) : jiraLoading ? (
+              <div className="detail-loading">
+                <span className="spinner"></span> Loading Jira data...
+              </div>
+            ) : jiraError ? (
+              <div className="detail-error">
+                <span>⚠️ {jiraError}</span>
+                <a 
+                  href={page.jiraUrl} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="btn btn-secondary btn-sm"
+                >
+                  Open {page.jiraTicket} anyway →
+                </a>
+              </div>
+            ) : jiraData ? (
+              <>
+                <div className="jira-header">
+                  <a 
+                    href={jiraData.url} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="jira-key"
+                  >
+                    {jiraData.key}
+                  </a>
+                  <span 
+                    className="jira-status"
+                    style={{ backgroundColor: getStatusColor(jiraData.status?.category) }}
+                  >
+                    {jiraData.status?.name}
+                  </span>
+                </div>
+                <p className="jira-summary">{jiraData.summary}</p>
+                
+                <div className="detail-grid">
+                  <div className="detail-item">
+                    <span className="detail-label">Assignee</span>
+                    <span className="detail-value">
+                      {jiraData.assignee ? (
+                        <span className="user-badge">
+                          {jiraData.assignee.avatarUrl && (
+                            <img src={jiraData.assignee.avatarUrl} alt="" className="user-avatar" />
+                          )}
+                          {jiraData.assignee.displayName}
+                        </span>
+                      ) : (
+                        <span className="unassigned">Unassigned</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="detail-item">
+                    <span className="detail-label">Reporter</span>
+                    <span className="detail-value">
+                      {jiraData.reporter ? (
+                        <span className="user-badge">
+                          {jiraData.reporter.avatarUrl && (
+                            <img src={jiraData.reporter.avatarUrl} alt="" className="user-avatar" />
+                          )}
+                          {jiraData.reporter.displayName}
+                        </span>
+                      ) : '—'}
+                    </span>
+                  </div>
+                  <div className="detail-item">
+                    <span className="detail-label">Priority</span>
+                    <span className="detail-value">
+                      {jiraData.priority ? (
+                        <span className="priority-badge">
+                          {jiraData.priority.iconUrl && (
+                            <img src={jiraData.priority.iconUrl} alt="" className="priority-icon" />
+                          )}
+                          {jiraData.priority.name}
+                        </span>
+                      ) : '—'}
+                    </span>
+                  </div>
+                  <div className="detail-item">
+                    <span className="detail-label">Type</span>
+                    <span className="detail-value">
+                      {jiraData.issueType ? (
+                        <span className="type-badge">
+                          {jiraData.issueType.iconUrl && (
+                            <img src={jiraData.issueType.iconUrl} alt="" className="type-icon" />
+                          )}
+                          {jiraData.issueType.name}
+                        </span>
+                      ) : '—'}
+                    </span>
+                  </div>
+                  {jiraData.dueDate && (
+                    <div className="detail-item">
+                      <span className="detail-label">Due Date</span>
+                      <span className="detail-value">{new Date(jiraData.dueDate).toLocaleDateString()}</span>
+                    </div>
+                  )}
+                  {jiraData.fixVersions?.length > 0 && (
+                    <div className="detail-item">
+                      <span className="detail-label">Fix Version</span>
+                      <span className="detail-value">{jiraData.fixVersions.join(', ')}</span>
+                    </div>
+                  )}
+                </div>
+
+                {jiraData.labels?.length > 0 && (
+                  <div className="jira-labels">
+                    {jiraData.labels.map(label => (
+                      <span key={label} className="jira-label">{label}</span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="detail-actions">
+                  <a href={jiraData.url} target="_blank" rel="noopener noreferrer" className="btn btn-primary">
+                    Open in Jira →
+                  </a>
+                  <button 
+                    className="btn btn-secondary" 
+                    onClick={() => onViewJiraComments?.(page, jiraData)}
+                  >
+                    💬 Jira Comments
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </section>
+
+          {/* Reference Assignee from Confluence */}
+          {page.referenceAssignee && (
+            <section className="detail-section detail-section-small">
+              <h3>👤 Reference Ticket Assignee</h3>
+              <p className="reference-assignee">{page.referenceAssignee}</p>
+            </section>
+          )}
+
+          {/* Quick Actions */}
+          <section className="detail-section">
+            <h3>🚀 Quick Actions</h3>
+            <div className="quick-actions">
+              {Object.entries(statuses).map(([key, status]) => (
+                key !== currentStatus && (
+                  <button 
+                    key={key}
+                    className="quick-action-btn"
+                    onClick={() => onMove(page, key)}
+                  >
+                    <span>{status.icon}</span>
+                    Move to {status.name}
+                  </button>
+                )
+              ))}
+              {onAddToLaunchNotes && (
+                <button 
+                  className="quick-action-btn launchnotes-btn"
+                  onClick={() => onAddToLaunchNotes([page])}
+                  title="Create draft in LaunchNotes"
+                >
+                  <span>🚀</span>
+                  Add to LaunchNotes
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Overflow menu component
+const OverflowMenu = ({ page, statuses, currentStatus, onMove, onViewComments, isAssigned, onAssign, onUnassign }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [dropdownStyle, setDropdownStyle] = useState({});
+  const [copied, setCopied] = useState(false);
+  const menuRef = React.useRef(null);
+  const buttonRef = React.useRef(null);
+
+  const handleMove = (targetStatus) => {
+    onMove(page, targetStatus);
+    setIsOpen(false);
+  };
+
+  const handleAssign = () => {
+    if (isAssigned) {
+      onUnassign(page.id);
+    } else {
+      onAssign(page.id);
+    }
+    setIsOpen(false);
+  };
+
+  const handleCopyUrl = async () => {
+    if (page.url) {
+      try {
+        await navigator.clipboard.writeText(page.url);
+        setCopied(true);
+        setTimeout(() => {
+          setCopied(false);
+          setIsOpen(false);
+        }, 1500);
+      } catch (err) {
+        console.error('Failed to copy URL:', err);
+      }
+    }
+  };
+
+  const handleToggle = () => {
+    if (!isOpen && buttonRef.current) {
+      // Calculate position for fixed dropdown
+      const rect = buttonRef.current.getBoundingClientRect();
+      const dropdownWidth = 180; // min-width from CSS
+      const spaceOnRight = window.innerWidth - rect.right;
+      const spaceOnLeft = rect.left;
+      
+      // Position dropdown - prefer right alignment, but switch to left if not enough space
+      let right, left;
+      if (spaceOnRight >= dropdownWidth || spaceOnRight >= spaceOnLeft) {
+        right = `${window.innerWidth - rect.right}px`;
+        left = 'auto';
+      } else {
+        left = `${rect.left}px`;
+        right = 'auto';
+      }
+      
+      setDropdownStyle({
+        top: `${rect.bottom + 4}px`,
+        right,
+        left
+      });
+    }
+    setIsOpen(!isOpen);
+  };
+
+  return (
+    <div className="overflow-menu" ref={menuRef}>
+      <button 
+        ref={buttonRef}
+        className="overflow-btn"
+        onClick={handleToggle}
+        title="Actions"
+      >
+        ⋮
+      </button>
+      {isOpen && (
+        <>
+          <div className="overflow-backdrop" onClick={() => setIsOpen(false)} />
+          <div className="overflow-dropdown" style={dropdownStyle}>
+            <button onClick={handleAssign}>
+              {isAssigned ? '✅ Assigned to me' : '➕ Assign to me'}
+            </button>
+            <div className="overflow-divider" />
+            <button onClick={() => { onViewComments(page); setIsOpen(false); }}>
+              💬 View Comments
+            </button>
+            <button onClick={handleCopyUrl} disabled={!page.url}>
+              {copied ? '✓ Copied!' : '📋 Copy URL'}
+            </button>
+            <a 
+              href={page.url} 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="overflow-link"
+              onClick={() => setIsOpen(false)}
+            >
+              🔗 Open in Confluence
+            </a>
+            <div className="overflow-divider" />
+            <div className="overflow-label">Move to...</div>
+            {Object.entries(statuses).map(([key, status]) => (
+              key !== currentStatus && (
+                <button 
+                  key={key} 
+                  onClick={() => handleMove(key)}
+                  className="move-option"
+                >
+                  <span>{status.icon}</span> {status.name}
+                </button>
+              )
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+// Mention input component with @user autocomplete
+const MentionInput = ({ value, onChange, placeholder, onSubmit, disabled }) => {
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionStartIndex, setMentionStartIndex] = useState(-1);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const textareaRef = React.useRef(null);
+
+  // Store mentions for conversion to Confluence format
+  const [mentions, setMentions] = useState([]);
+
+  const searchUsers = useCallback(async (query) => {
+    if (query.length < 2) {
+      setSuggestions([]);
+      return;
+    }
+    
+    setSearchLoading(true);
+    try {
+      const response = await authenticatedFetch(`/api/users/search?q=${encodeURIComponent(query)}`);
+      const data = await response.json();
+      setSuggestions(data.users || []);
+      setSelectedIndex(0);
+    } catch (err) {
+      console.error('Failed to search users:', err);
+      setSuggestions([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, []);
+
+  const handleChange = (e) => {
+    const newValue = e.target.value;
+    const cursorPos = e.target.selectionStart;
+    
+    // Check if we're in a mention context
+    const textBeforeCursor = newValue.slice(0, cursorPos);
+    const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+    
+    if (lastAtIndex !== -1) {
+      const textAfterAt = textBeforeCursor.slice(lastAtIndex + 1);
+      // Check if there's no space after @
+      if (!textAfterAt.includes(' ') && !textAfterAt.includes('\n')) {
+        setMentionStartIndex(lastAtIndex);
+        setMentionQuery(textAfterAt);
+        setShowSuggestions(true);
+        searchUsers(textAfterAt);
+      } else {
+        setShowSuggestions(false);
+        setMentionQuery('');
+      }
+    } else {
+      setShowSuggestions(false);
+      setMentionQuery('');
+    }
+    
+    onChange(newValue);
+  };
+
+  const insertMention = (user) => {
+    const beforeMention = value.slice(0, mentionStartIndex);
+    const afterMention = value.slice(mentionStartIndex + mentionQuery.length + 1);
+    const mentionText = `@${user.displayName}`;
+    
+    const newValue = beforeMention + mentionText + ' ' + afterMention;
+    
+    // Track this mention for later conversion
+    setMentions(prev => [...prev, {
+      text: mentionText,
+      accountId: user.accountId,
+      displayName: user.displayName
+    }]);
+    
+    onChange(newValue);
+    setShowSuggestions(false);
+    setMentionQuery('');
+    
+    // Focus back on textarea
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        const newCursorPos = beforeMention.length + mentionText.length + 1;
+        textareaRef.current.setSelectionRange(newCursorPos, newCursorPos);
+      }
+    }, 0);
+  };
+
+  const handleKeyDown = (e) => {
+    if (showSuggestions && suggestions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedIndex(prev => (prev + 1) % suggestions.length);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedIndex(prev => (prev - 1 + suggestions.length) % suggestions.length);
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        insertMention(suggestions[selectedIndex]);
+      } else if (e.key === 'Escape') {
+        setShowSuggestions(false);
+      }
+    } else if (e.key === 'Enter' && e.metaKey) {
+      e.preventDefault();
+      onSubmit?.();
+    }
+  };
+
+  // Convert plain text with @mentions to Confluence storage format
+  const getConfluenceMarkup = () => {
+    let result = value;
+    
+    // Replace each mention with Confluence markup
+    mentions.forEach(mention => {
+      const mentionRegex = new RegExp(mention.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+      result = result.replace(
+        mentionRegex,
+        `<ac:link><ri:user ri:account-id="${mention.accountId}" /></ac:link>`
+      );
+    });
+    
+    return result;
+  };
+
+  // Expose the getConfluenceMarkup function
+  React.useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.getConfluenceMarkup = getConfluenceMarkup;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, mentions]);
+
+  return (
+    <div className="mention-input-container">
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        rows={3}
+        disabled={disabled}
+      />
+      {showSuggestions && (
+        <div className="mention-suggestions">
+          {searchLoading ? (
+            <div className="mention-loading">
+              <span className="spinner"></span> Searching...
+            </div>
+          ) : suggestions.length === 0 ? (
+            <div className="mention-empty">
+              {mentionQuery.length < 2 ? 'Type at least 2 characters...' : 'No users found'}
+            </div>
+          ) : (
+            suggestions.map((user, index) => (
+              <button
+                key={user.accountId}
+                className={`mention-suggestion ${index === selectedIndex ? 'selected' : ''}`}
+                onClick={() => insertMention(user)}
+                type="button"
+              >
+                <div className="mention-avatar">
+                  {user.avatarUrl ? (
+                    <img src={user.avatarUrl} alt="" />
+                  ) : (
+                    <span>{user.displayName?.[0]?.toUpperCase() || '?'}</span>
+                  )}
+                </div>
+                <div className="mention-info">
+                  <span className="mention-name">{user.displayName}</span>
+                  {user.email && <span className="mention-email">{user.email}</span>}
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+      <div className="mention-hint">
+        💡 Type <code>@name</code> to mention someone • <code>⌘+Enter</code> to submit
+      </div>
+    </div>
+  );
+};
+
+// Threaded Comment Viewer Component
+const ThreadedCommentViewer = ({ comments, onAddComment, onReply, loading, type = 'confluence' }) => {
+  const [replyingTo, setReplyingTo] = useState(null);
+  const [replyTexts, setReplyTexts] = useState({});
+  const [submitting, setSubmitting] = useState(false);
+
+  // Ensure comments is always an array
+  const safeComments = Array.isArray(comments) ? comments : [];
+
+  const handleReply = async (parentId) => {
+    const replyText = replyTexts[parentId] || '';
+    if (!replyText.trim()) return;
+    setSubmitting(true);
+    await onReply(parentId, replyText);
+    setReplyTexts(prev => {
+      const newTexts = { ...prev };
+      delete newTexts[parentId];
+      return newTexts;
+    });
+    setReplyingTo(null);
+    setSubmitting(false);
+  };
+
+  const renderComment = (comment, depth = 0) => {
+    const isJira = type === 'jira';
+    const author = isJira ? comment.author?.displayName : comment.author;
+    const avatarUrl = isJira ? comment.author?.avatarUrl : comment.authorAvatar;
+    const body = isJira ? comment.renderedBody : comment.body;
+    const date = isJira ? new Date(comment.created) : new Date(comment.createdDate);
+    const daysAgo = Math.floor((Date.now() - date.getTime()) / (1000 * 60 * 60 * 24));
+    const isReplying = replyingTo === comment.id;
+    const replyText = replyTexts[comment.id] || '';
+
+    return (
+      <div key={comment.id} className={`threaded-comment ${depth > 0 ? 'threaded-reply' : ''}`} style={{ marginLeft: `${depth * 24}px` }}>
+        <div className="comment-header">
+          <div className="comment-author-info">
+            {avatarUrl && (
+              <img src={avatarUrl} alt="" className="comment-avatar" />
+            )}
+            <span className="comment-author">{author}</span>
+          </div>
+          <span className="comment-date">{daysAgo === 0 ? 'just now' : `${daysAgo} day${daysAgo !== 1 ? 's' : ''} ago`}</span>
+        </div>
+        <div 
+          className="comment-body"
+          dangerouslySetInnerHTML={{ __html: body }}
+        />
+        <div className="comment-actions">
+          <button
+            className="comment-reply-btn"
+            onClick={() => setReplyingTo(isReplying ? null : comment.id)}
+          >
+            Reply
+          </button>
+        </div>
+        {isReplying && (
+          <div className="comment-reply-form">
+            <MentionInput
+              value={replyText}
+              onChange={(text) => setReplyTexts(prev => ({ ...prev, [comment.id]: text }))}
+              placeholder="Write a reply... (use @ to mention someone)"
+              onSubmit={() => handleReply(comment.id)}
+              disabled={submitting}
+            />
+            <div className="comment-reply-actions">
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  setReplyingTo(null);
+                  setReplyTexts(prev => {
+                    const newTexts = { ...prev };
+                    delete newTexts[comment.id];
+                    return newTexts;
+                  });
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => handleReply(comment.id)}
+                disabled={!replyText.trim() || submitting}
+              >
+                {submitting ? 'Posting...' : 'Post Reply'}
+              </button>
+            </div>
+          </div>
+        )}
+        {comment.replies && comment.replies.length > 0 && (
+          <div className="comment-replies">
+            {comment.replies.map(reply => renderComment(reply, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="threaded-comments">
+      {loading ? (
+        <div className="loading-state">
+          <div className="spinner"></div>
+          <span>Loading comments...</span>
+        </div>
+      ) : safeComments.length === 0 ? (
+        <div className="empty-state">
+          <span className="empty-icon">💬</span>
+          <p>No comments yet</p>
+        </div>
+      ) : (
+        <div className="threaded-comments-list">
+          {safeComments.map(comment => renderComment(comment))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Comment modal component
+const CommentModal = ({ page, comments, loading, onClose, onAddComment, type = 'confluence' }) => {
+  const [newComment, setNewComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e?.preventDefault();
+    if (!newComment.trim()) return;
+    
+    setSubmitting(true);
+    
+    if (type === 'confluence') {
+      // Get the Confluence markup version of the comment
+      const textarea = document.querySelector('.mention-input-container textarea');
+      const confluenceMarkup = textarea?.getConfluenceMarkup?.() || newComment;
+      await onAddComment(page.id, confluenceMarkup);
+    } else {
+      // For Jira, we'll handle it differently
+      await onAddComment(newComment);
+    }
+    
+    setNewComment('');
+    setSubmitting(false);
+  };
+
+  const handleReply = async (parentId, replyText) => {
+    if (type === 'jira') {
+      // For Jira threaded replies
+      await onAddComment(replyText, parentId);
+    } else {
+      // For Confluence threaded replies
+      const textarea = document.querySelector('.mention-input-container textarea');
+      const confluenceMarkup = textarea?.getConfluenceMarkup?.() || replyText;
+      await onAddComment(page.id, confluenceMarkup, parentId);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>{type === 'jira' ? `Jira Comments on ${page.jiraTicket}` : `Confluence Comments on "${page.title}"`}</h2>
+          <button className="close-btn" onClick={onClose}>×</button>
+        </div>
+        
+        <div className="modal-body">
+          <ThreadedCommentViewer
+            comments={comments}
+            onAddComment={onAddComment}
+            onReply={handleReply}
+            loading={loading}
+            type={type}
+          />
+          
+          <form onSubmit={handleSubmit} className="add-comment-form">
+            <MentionInput
+              value={newComment}
+              onChange={setNewComment}
+              placeholder={`Add a ${type === 'jira' ? 'Jira' : 'Confluence'} comment... (use @ to mention someone)`}
+              onSubmit={handleSubmit}
+              disabled={submitting}
+            />
+            <button 
+              type="submit" 
+              className="btn btn-primary"
+              disabled={!newComment.trim() || submitting}
+            >
+              {submitting ? 'Adding...' : 'Add Comment'}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Confirm modal component (simple version for non-move actions)
+const ConfirmModal = ({ title, message, confirmText, onConfirm, onCancel, loading }) => {
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal modal-sm" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>{title}</h2>
+        </div>
+        <div className="modal-body">
+          <p>{message}</p>
+          <div className="modal-actions">
+            <button className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" onClick={onConfirm} disabled={loading}>
+              {loading ? 'Moving...' : confirmText || 'Confirm'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Quick Comment Menu Component with customizable templates
+const QuickCommentMenu = ({ jiraData, page, onSelect, mentions, setMentions }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = React.useRef(null);
+  const buttonRef = React.useRef(null);
+
+  // Get saved templates from localStorage or use defaults
+  const getTemplates = () => {
+    const saved = localStorage.getItem('quickCommentTemplates');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // Fall through to defaults
+      }
+    }
+    // Default templates
+    return [
+      {
+        id: 'rovo-review',
+        name: 'See Rovo review',
+        template: `Hello {assignee}! This seems like a valid candidate for updates.toasttab.com. If you agree, please see the feedback on the release notes page {pageUrl} and let me know if you have any questions.`
+      },
+      {
+        id: 'insufficient-details',
+        name: 'Insufficient details - discarding',
+        template: `Hello {assignee}! There is not enough information in this ticket to craft a release note. Let us know once additional details are added so we can reprocess this ticket for a release note. For now, we are discarding the release note page for this change. (Release note confluence page: {pageUrl})`
+      },
+      {
+        id: 'ready-for-review',
+        name: 'Ready for review',
+        template: `Hello {assignee}! The release note for this ticket is ready for your review. Please check the Confluence page {pageUrl} and let me know if any changes are needed.`
+      },
+      {
+        id: 'published',
+        name: 'Published to updates.toasttab.com',
+        template: `Hello {assignee}! The release note for this ticket has been published to updates.toasttab.com. You can view it at {pageUrl}.`
+      },
+      {
+        id: 'needs-revision',
+        name: 'Needs revision',
+        template: `Hello {assignee}! The release note for this ticket needs some revisions. Please review the feedback on {pageUrl} and update as needed.`
+      },
+      {
+        id: 'moved-to-in-progress',
+        name: 'Moved to In Progress',
+        template: `Hello {assignee}! The release note for this ticket has been moved to In Progress. You can track its status at {pageUrl}.`
+      }
+    ];
+  };
+
+  const [templates, setTemplates] = useState(getTemplates());
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target) && 
+          buttonRef.current && !buttonRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    };
+
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [isOpen]);
+
+  // Replace template variables with actual values
+  const processTemplate = (templateText) => {
+    const assigneeMention = jiraData?.assignee ? `@${jiraData.assignee.displayName}` : 'there';
+    const pageUrl = page?.url || '';
+    const reporterMention = jiraData?.reporter ? `@${jiraData.reporter.displayName}` : '';
+    
+    return templateText
+      .replace(/{assignee}/g, assigneeMention)
+      .replace(/{pageUrl}/g, pageUrl)
+      .replace(/{reporter}/g, reporterMention)
+      .replace(/{ticket}/g, page?.jiraTicket || '');
+  };
+
+  const handleSelect = (template) => {
+    const processedTemplate = processTemplate(template.template);
+    onSelect(processedTemplate);
+    // Track the mention if assignee exists
+    if (jiraData?.assignee && !mentions.find(m => m.accountId === jiraData.assignee.accountId)) {
+      setMentions([{
+        accountId: jiraData.assignee.accountId,
+        displayName: jiraData.assignee.displayName
+      }]);
+    }
+    setIsOpen(false);
+  };
+
+
+  return (
+    <div className="quick-comment-menu" ref={menuRef}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="btn btn-secondary btn-sm quick-comment-btn"
+        onClick={() => setIsOpen(!isOpen)}
+        title="Quick comment templates"
+      >
+        ⚡ Quick Comment
+        <span className="quick-comment-arrow">{isOpen ? '▲' : '▼'}</span>
+      </button>
+      {isOpen && (
+        <div className="quick-comment-dropdown">
+          {templates.map(template => (
+            <button
+              key={template.id}
+              type="button"
+              className="quick-comment-option"
+              onClick={() => handleSelect(template)}
+              title={processTemplate(template.template).substring(0, 100) + '...'}
+            >
+              <span className="quick-comment-option-name">{template.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Label Selector Component
+const LabelSelector = ({ selectedLabels, onChange }) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
+
+  const searchLabels = useCallback(async (query) => {
+    if (!query || query.trim().length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    setSearching(true);
+    try {
+      const response = await authenticatedFetch(`/api/jira/labels?query=${encodeURIComponent(query)}`);
+      const data = await response.json();
+      setSearchResults(data.labels || []);
+    } catch (err) {
+      console.error('Error searching labels:', err);
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      if (searchQuery) {
+        searchLabels(searchQuery);
+      } else {
+        setSearchResults([]);
+      }
+    }, 300);
+
+    return () => clearTimeout(timeoutId);
+  }, [searchQuery, searchLabels]);
+
+  const handleAddLabel = (label) => {
+    if (!selectedLabels.includes(label)) {
+      onChange([...selectedLabels, label]);
+    }
+    setSearchQuery('');
+    setSearchResults([]);
+    setShowDropdown(false);
+  };
+
+  const handleRemoveLabel = (label) => {
+    onChange(selectedLabels.filter(l => l !== label));
+  };
+
+  const handleInputKeyDown = (e) => {
+    if (e.key === 'Enter' && searchQuery.trim() && !searchResults.includes(searchQuery.trim())) {
+      e.preventDefault();
+      handleAddLabel(searchQuery.trim());
+    }
+  };
+
+  return (
+    <div className="label-selector">
+      <label className="jira-comment-label">Labels (optional)</label>
+      <div className="label-input-wrapper">
+        <input
+          type="text"
+          className="label-search-input"
+          placeholder="Type to search labels or press Enter to add..."
+          value={searchQuery}
+          onChange={(e) => {
+            setSearchQuery(e.target.value);
+            setShowDropdown(true);
+          }}
+          onFocus={() => setShowDropdown(true)}
+          onKeyDown={handleInputKeyDown}
+        />
+        {showDropdown && (searchResults.length > 0 || searching) && (
+          <div className="label-dropdown">
+            {searching ? (
+              <div className="label-dropdown-item">Searching...</div>
+            ) : searchResults.length > 0 ? (
+              searchResults
+                .filter(label => !selectedLabels.includes(label))
+                .map(label => (
+                  <div
+                    key={label}
+                    className="label-dropdown-item clickable"
+                    onClick={() => handleAddLabel(label)}
+                  >
+                    {label}
+                  </div>
+                ))
+            ) : searchQuery.length >= 2 ? (
+              <div className="label-dropdown-item">
+                No labels found. Press Enter to add "{searchQuery}"
+              </div>
+            ) : null}
+          </div>
+        )}
+      </div>
+      {selectedLabels.length > 0 && (
+        <div className="selected-labels">
+          {selectedLabels.map(label => (
+            <span key={label} className="jira-label selected">
+              {label}
+              <button
+                type="button"
+                className="label-remove-btn"
+                onClick={() => handleRemoveLabel(label)}
+                aria-label={`Remove ${label}`}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="jira-comment-hint">
+        💡 Search for existing labels or type a new label and press Enter
+      </div>
+    </div>
+  );
+};
+
+// Bulk Edit Modal - unified modal for all bulk actions
+const BulkEditModal = ({ pages, currentStatus, statuses, onConfirm, onCancel, loading, onAssignToMe, onAddToLaunchNotes }) => {
+  const [selectedStatus, setSelectedStatus] = useState(null); // null = keep current, or status key
+  const [jiraComment, setJiraComment] = useState('');
+  const [confluenceComment, setConfluenceComment] = useState('');
+  const [commentType, setCommentType] = useState('jira'); // 'jira', 'confluence', 'both'
+  const [useIndividualSelection, setUseIndividualSelection] = useState(false); // Toggle between mass and individual selection
+  const [pageCommentDestinations, setPageCommentDestinations] = useState({}); // { pageId: { jira: boolean, confluence: boolean } }
+  const [selectedLabels, setSelectedLabels] = useState([]);
+  const [mentions, setMentions] = useState([]);
+  const [jiraTickets, setJiraTickets] = useState([]);
+  const [loadingTickets, setLoadingTickets] = useState(true);
+  const [activeTab, setActiveTab] = useState('location'); // 'location', 'assign', 'labels', 'comments'
+
+  // Load Jira ticket info for all pages with tickets
+  useEffect(() => {
+    const loadJiraTickets = async () => {
+      const pagesWithTickets = pages.filter(p => p.jiraTicket);
+      if (pagesWithTickets.length === 0) {
+        setLoadingTickets(false);
+        return;
+      }
+
+      setLoadingTickets(true);
+      const ticketPromises = pagesWithTickets.map(async (page) => {
+        try {
+          const response = await authenticatedFetch(`/api/jira/issue/${page.jiraTicket}`);
+          const data = await response.json();
+          if (!data.error) {
+            return { page, jiraData: data };
+          }
+        } catch (err) {
+          console.error(`Failed to load Jira ticket ${page.jiraTicket}:`, err);
+        }
+        return { page, jiraData: null };
+      });
+
+      const results = await Promise.all(ticketPromises);
+      setJiraTickets(results.filter(r => r.jiraData));
+      setLoadingTickets(false);
+    };
+
+    loadJiraTickets();
+  }, [pages]);
+
+  const handleMentionClick = (user) => {
+    const mentionText = `@${user.displayName} `;
+    setJiraComment(prev => prev + mentionText);
+    
+    if (!mentions.find(m => m.accountId === user.accountId)) {
+      setMentions(prev => [...prev, {
+        accountId: user.accountId,
+        displayName: user.displayName
+      }]);
+    }
+  };
+
+  // Initialize page comment destinations when switching to individual mode
+  useEffect(() => {
+    if (useIndividualSelection && Object.keys(pageCommentDestinations).length === 0) {
+      const initialDestinations = {};
+      pages.forEach(page => {
+        initialDestinations[page.id] = {
+          jira: page.jiraTicket ? (commentType === 'jira' || commentType === 'both') : false,
+          confluence: commentType === 'confluence' || commentType === 'both'
+        };
+      });
+      setPageCommentDestinations(initialDestinations);
+    }
+  }, [useIndividualSelection, pages, commentType]);
+
+  const togglePageCommentDestination = (pageId, destination) => {
+    setPageCommentDestinations(prev => ({
+      ...prev,
+      [pageId]: {
+        ...prev[pageId],
+        [destination]: !prev[pageId]?.[destination]
+      }
+    }));
+  };
+
+  const handleConfirm = () => {
+    let jiraCommentData = null;
+    let confluenceCommentData = null;
+    const pageCommentMap = {}; // { pageId: { jira: boolean, confluence: boolean } }
+
+    if (useIndividualSelection) {
+      // Individual selection mode - build per-page comment map
+      pages.forEach(page => {
+        const destinations = pageCommentDestinations[page.id] || { jira: false, confluence: false };
+        if (destinations.jira && page.jiraTicket && jiraComment.trim()) {
+          if (!pageCommentMap[page.id]) pageCommentMap[page.id] = {};
+          pageCommentMap[page.id].jira = true;
+        }
+        if (destinations.confluence && confluenceComment.trim()) {
+          if (!pageCommentMap[page.id]) pageCommentMap[page.id] = {};
+          pageCommentMap[page.id].confluence = true;
+        }
+      });
+
+      // Set comment data if any pages need them
+      const hasJiraComments = Object.values(pageCommentMap).some(m => m.jira);
+      const hasConfluenceComments = Object.values(pageCommentMap).some(m => m.confluence);
+
+      if (hasJiraComments && jiraComment.trim()) {
+        jiraCommentData = {
+          body: jiraComment,
+          mentions: mentions,
+          pageMap: pageCommentMap
+        };
+      }
+      if (hasConfluenceComments && confluenceComment.trim()) {
+        confluenceCommentData = {
+          body: confluenceComment,
+          pageMap: pageCommentMap
+        };
+      }
+    } else {
+      // Mass selection mode - use commentType
+      if ((commentType === 'jira' || commentType === 'both') && jiraComment.trim()) {
+        jiraCommentData = {
+      body: jiraComment,
+      mentions: mentions
+        };
+      }
+      if ((commentType === 'confluence' || commentType === 'both') && confluenceComment.trim()) {
+        confluenceCommentData = {
+          body: confluenceComment
+        };
+      }
+    }
+    
+    onConfirm(
+      selectedStatus, // targetStatus (null = no move)
+      jiraCommentData,
+      confluenceCommentData,
+      selectedLabels.length > 0 ? selectedLabels : null
+    );
+  };
+
+  const pagesWithTickets = pages.filter(p => p.jiraTicket);
+  const pagesWithoutTickets = pages.filter(p => !p.jiraTicket);
+  
+  // Calculate if there are comments to add
+  let hasJiraComment = false;
+  let hasConfluenceComment = false;
+  
+  if (useIndividualSelection) {
+    hasJiraComment = jiraComment.trim() && Object.values(pageCommentDestinations).some(d => d?.jira);
+    hasConfluenceComment = confluenceComment.trim() && Object.values(pageCommentDestinations).some(d => d?.confluence);
+  } else {
+    hasJiraComment = (commentType === 'jira' || commentType === 'both') && jiraComment.trim();
+    hasConfluenceComment = (commentType === 'confluence' || commentType === 'both') && confluenceComment.trim();
+  }
+  
+  const hasChanges = selectedStatus !== null || hasJiraComment || hasConfluenceComment || selectedLabels.length > 0;
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Edit {pages.length} Page{pages.length !== 1 ? 's' : ''}</h2>
+          <button className="close-btn" onClick={onCancel}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className="bulk-edit-content">
+            {/* Selected Pages Summary */}
+            <div className="bulk-edit-summary">
+              <div className="bulk-pages-list">
+                <h4>Selected Pages ({pages.length}):</h4>
+                <ul className="bulk-pages-ul">
+                  {pages.slice(0, 5).map(page => (
+                    <li key={page.id}>
+                      {page.title}
+                      {page.jiraTicket && (
+                        <span className="jira-ticket-badge">🎫 {page.jiraTicket}</span>
+                      )}
+                    </li>
+                  ))}
+                  {pages.length > 5 && (
+                    <li className="bulk-pages-more">... and {pages.length - 5} more</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+
+            {/* Tab Navigation */}
+            <div className="bulk-edit-tabs">
+              <button
+                className={`bulk-edit-tab ${activeTab === 'location' ? 'active' : ''}`}
+                onClick={() => setActiveTab('location')}
+              >
+                📍 Location
+              </button>
+              <button
+                className={`bulk-edit-tab ${activeTab === 'assign' ? 'active' : ''}`}
+                onClick={() => setActiveTab('assign')}
+              >
+                ✅ Assign
+              </button>
+              <button
+                className={`bulk-edit-tab ${activeTab === 'labels' ? 'active' : ''}`}
+                onClick={() => setActiveTab('labels')}
+              >
+                🏷️ Labels
+              </button>
+              <button
+                className={`bulk-edit-tab ${activeTab === 'comments' ? 'active' : ''}`}
+                onClick={() => setActiveTab('comments')}
+              >
+                💬 Comments
+              </button>
+              <button
+                className={`bulk-edit-tab ${activeTab === 'launchnotes' ? 'active' : ''}`}
+                onClick={() => setActiveTab('launchnotes')}
+              >
+                🚀 LaunchNotes
+              </button>
+            </div>
+
+            {/* Location Tab */}
+            {activeTab === 'location' && (
+              <div className="bulk-edit-section">
+                <h3>Change Location</h3>
+                <p className="bulk-edit-hint">
+                  Select a new location for these pages, or leave unchanged to keep them in their current location.
+                </p>
+                <div className="status-selection-grid">
+                  <button
+                    className={`status-option ${selectedStatus === null ? 'selected' : ''}`}
+                    onClick={() => setSelectedStatus(null)}
+                  >
+                    <span className="status-option-icon">📍</span>
+                    <span className="status-option-name">Keep Current Location</span>
+                  </button>
+                  {Object.entries(statuses).map(([key, status]) => (
+                    <button
+                      key={key}
+                      className={`status-option ${selectedStatus === key ? 'selected' : ''} ${key === currentStatus ? 'current' : ''}`}
+                      onClick={() => setSelectedStatus(key)}
+                    >
+                      <span className="status-option-icon">{status.icon}</span>
+                      <span className="status-option-name">{status.name}</span>
+                      {key === currentStatus && <span className="status-option-badge">Current</span>}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Assign Tab */}
+            {activeTab === 'assign' && (
+              <div className="bulk-edit-section">
+                <h3>Assign to Me</h3>
+                <p className="bulk-edit-hint">
+                  Assign these {pages.length} page{pages.length !== 1 ? 's' : ''} to yourself. They will appear in "My Tasks".
+                </p>
+                <div className="bulk-assign-actions">
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => {
+                      pages.forEach(page => onAssignToMe(page.id));
+                      onCancel();
+                    }}
+                  >
+                    ✅ Assign All {pages.length} Page{pages.length !== 1 ? 's' : ''} to Me
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Labels Tab */}
+            {activeTab === 'labels' && (
+              <div className="bulk-edit-section">
+                <h3>Add Labels</h3>
+                <p className="bulk-edit-hint">
+                  Add labels to all Jira tickets associated with these pages. Labels will be merged with existing ones.
+                </p>
+                {pagesWithTickets.length > 0 ? (
+                  <LabelSelector
+                    selectedLabels={selectedLabels}
+                    onChange={setSelectedLabels}
+                  />
+                ) : (
+                  <div className="bulk-edit-info">
+                    <p>⚠️ None of the selected pages have Jira tickets. Labels can only be added to pages with Jira tickets.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Comments Tab */}
+            {activeTab === 'comments' && (
+              <div className="bulk-edit-section">
+                <h3>Add Comments</h3>
+                <p className="bulk-edit-hint">
+                  Add comments to Jira tickets, Confluence pages, or both.
+                </p>
+                
+                {/* Selection Mode Toggle */}
+                <div className="comment-selection-mode">
+                  <label className="selection-mode-toggle">
+                    <input
+                      type="checkbox"
+                      checked={useIndividualSelection}
+                      onChange={(e) => setUseIndividualSelection(e.target.checked)}
+                    />
+                    <span>Select comment destination individually per page</span>
+                  </label>
+                </div>
+
+                {!useIndividualSelection ? (
+                  /* Mass Selection Mode */
+                  <div className="comment-type-selector">
+                    <label className="comment-type-label">Comment Destination (applies to all pages):</label>
+                    <div className="comment-type-options">
+                      <button
+                        type="button"
+                        className={`comment-type-btn ${commentType === 'jira' ? 'active' : ''}`}
+                        onClick={() => setCommentType('jira')}
+                        disabled={pagesWithTickets.length === 0}
+                        title={pagesWithTickets.length === 0 ? 'No pages have Jira tickets' : 'Add comment to Jira tickets only'}
+                      >
+                        🎫 Jira Only
+                      </button>
+                      <button
+                        type="button"
+                        className={`comment-type-btn ${commentType === 'confluence' ? 'active' : ''}`}
+                        onClick={() => setCommentType('confluence')}
+                        title="Add comment to Confluence pages only"
+                      >
+                        📄 Confluence Only
+                      </button>
+                      <button
+                        type="button"
+                        className={`comment-type-btn ${commentType === 'both' ? 'active' : ''}`}
+                        onClick={() => setCommentType('both')}
+                        disabled={pagesWithTickets.length === 0}
+                        title={pagesWithTickets.length === 0 ? 'No pages have Jira tickets' : 'Add comment to both Jira tickets and Confluence pages'}
+                      >
+                        🔄 Both
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* Individual Selection Mode */
+                  <div className="individual-comment-selection">
+                    <label className="comment-type-label">Select comment destination for each page:</label>
+                    <div className="page-comment-destinations">
+                      {pages.map(page => {
+                        const destinations = pageCommentDestinations[page.id] || { jira: false, confluence: false };
+                        return (
+                          <div key={page.id} className="page-comment-destination-item">
+                            <div className="page-comment-destination-title">
+                              <strong>{page.title}</strong>
+                              {page.jiraTicket && (
+                                <span className="jira-ticket-badge">🎫 {page.jiraTicket}</span>
+                              )}
+                            </div>
+                            <div className="page-comment-destination-options">
+                              <label className="destination-checkbox">
+                                <input
+                                  type="checkbox"
+                                  checked={destinations.jira}
+                                  onChange={() => togglePageCommentDestination(page.id, 'jira')}
+                                  disabled={!page.jiraTicket}
+                                />
+                                <span>🎫 Jira</span>
+                              </label>
+                              <label className="destination-checkbox">
+                                <input
+                                  type="checkbox"
+                                  checked={destinations.confluence}
+                                  onChange={() => togglePageCommentDestination(page.id, 'confluence')}
+                                />
+                                <span>📄 Confluence</span>
+                              </label>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Jira Comment Section */}
+                {((!useIndividualSelection && (commentType === 'jira' || commentType === 'both')) || 
+                 (useIndividualSelection && Object.values(pageCommentDestinations).some(d => d?.jira))) && (
+                  <>
+                {pagesWithTickets.length > 0 ? (
+                  <>
+                    {loadingTickets ? (
+                      <div className="detail-loading">
+                        <span className="spinner"></span> Loading Jira ticket information...
+                      </div>
+                    ) : jiraTickets.length > 0 ? (
+                      <div className="bulk-jira-tickets">
+                        <p className="bulk-jira-info">
+                          The comment below will be added to all {jiraTickets.length} Jira ticket{jiraTickets.length !== 1 ? 's' : ''}:
+                        </p>
+                        <div className="bulk-jira-tickets-list">
+                          {jiraTickets.slice(0, 5).map(({ page, jiraData }) => (
+                            <div key={page.id} className="bulk-jira-ticket-item">
+                              <div className="jira-header">
+                                <a 
+                                  href={jiraData.url} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="jira-key"
+                                >
+                                  {jiraData.key}
+                                </a>
+                                <span className="jira-ticket-title">{page.title}</span>
+                              </div>
+                              {jiraData.assignee && (
+                                <button
+                                  className="jira-user-clickable"
+                                  onClick={() => handleMentionClick(jiraData.assignee)}
+                                  title="Click to @ mention"
+                                >
+                                  <span className="user-badge">
+                                    {jiraData.assignee.avatarUrl && (
+                                      <img src={jiraData.assignee.avatarUrl} alt="" className="user-avatar" />
+                                    )}
+                                    Assignee: {jiraData.assignee.displayName}
+                                  </span>
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                          {jiraTickets.length > 5 && (
+                            <div className="bulk-jira-tickets-more">
+                              ... and {jiraTickets.length - 5} more ticket{jiraTickets.length - 5 !== 1 ? 's' : ''}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="jira-comment-section">
+                      <div className="jira-comment-header">
+                        <label className="jira-comment-label">Comment (optional)</label>
+                        {jiraTickets.length > 0 && jiraTickets[0]?.jiraData && (
+                          <div className="comment-toolbar">
+                            {jiraTickets[0]?.page?.url && (
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm comment-toolbar-btn"
+                                onClick={() => {
+                                  const pageLink = `(${jiraTickets[0].page.url})`;
+                                  setJiraComment(prev => prev + (prev.trim() ? ' ' : '') + pageLink);
+                                }}
+                                title="Insert Confluence page link"
+                              >
+                                📄 Insert Page Link
+                              </button>
+                            )}
+                            <QuickCommentMenu
+                              jiraData={jiraTickets[0].jiraData}
+                              page={jiraTickets[0].page}
+                              onSelect={(template) => setJiraComment(template)}
+                              mentions={mentions}
+                              setMentions={setMentions}
+                            />
+                          </div>
+                        )}
+                      </div>
+                      <MentionInput
+                        value={jiraComment}
+                        onChange={setJiraComment}
+                        placeholder="Add a comment to all Jira tickets... (use @ to mention someone)"
+                        onSubmit={handleConfirm}
+                        disabled={loading}
+                      />
+                      <div className="jira-comment-hint">
+                        💡 Click on Assignee above to automatically @ mention them • This comment will be posted to all {pagesWithTickets.length} ticket{pagesWithTickets.length !== 1 ? 's' : ''}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="bulk-edit-info">
+                      <p>⚠️ None of the selected pages have Jira tickets. Jira comments can only be added to pages with Jira tickets.</p>
+                    </div>
+                  )}
+                </>
+                )}
+
+                {/* Confluence Comment Section */}
+                {((!useIndividualSelection && (commentType === 'confluence' || commentType === 'both')) || 
+                 (useIndividualSelection && Object.values(pageCommentDestinations).some(d => d?.confluence))) && (
+                  <div className="confluence-comment-section">
+                    <div className="confluence-comment-header">
+                      <label className="confluence-comment-label">Confluence Comment</label>
+                    </div>
+                    <textarea
+                      className="confluence-comment-input"
+                      value={confluenceComment}
+                      onChange={(e) => setConfluenceComment(e.target.value)}
+                      placeholder={`Add a comment to all ${pages.length} Confluence page${pages.length !== 1 ? 's' : ''}...`}
+                      rows={4}
+                      disabled={loading}
+                    />
+                    <div className="confluence-comment-hint">
+                      💡 This comment will be posted to all {pages.length} Confluence page{pages.length !== 1 ? 's' : ''}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* LaunchNotes Tab */}
+            {activeTab === 'launchnotes' && (
+              <div className="bulk-edit-section">
+                <h3>Add to LaunchNotes</h3>
+                <p className="bulk-edit-hint">
+                  Create release note drafts in LaunchNotes from the selected Confluence pages.
+                </p>
+                <div className="bulk-launchnotes-actions">
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => {
+                      if (onAddToLaunchNotes) {
+                        onAddToLaunchNotes(pages);
+                      }
+                    }}
+                  >
+                    🚀 Add {pages.length} Page{pages.length !== 1 ? 's' : ''} to LaunchNotes
+                  </button>
+                  <p className="bulk-edit-hint" style={{ marginTop: '12px', fontSize: '12px' }}>
+                    This will create draft release notes in LaunchNotes for each selected page. You can review and edit them in LaunchNotes before publishing.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Summary of Changes */}
+            {hasChanges && (
+              <div className="bulk-edit-summary-changes">
+                <h4>Summary of Changes:</h4>
+                <ul>
+                  {selectedStatus !== null && (
+                    <li>📍 Move to <strong>{statuses[selectedStatus]?.name}</strong></li>
+                  )}
+                  {selectedLabels.length > 0 && (
+                    <li>🏷️ Add {selectedLabels.length} label{selectedLabels.length !== 1 ? 's' : ''}: {selectedLabels.join(', ')}</li>
+                  )}
+                  {hasJiraComment && (
+                    <li>
+                      💬 Add Jira comment to {
+                        useIndividualSelection 
+                          ? Object.values(pageCommentDestinations).filter(d => d?.jira).length 
+                          : pagesWithTickets.length
+                      } ticket{useIndividualSelection 
+                        ? Object.values(pageCommentDestinations).filter(d => d?.jira).length !== 1 ? 's' : '' 
+                        : pagesWithTickets.length !== 1 ? 's' : ''}
+                    </li>
+                  )}
+                  {hasConfluenceComment && (
+                    <li>
+                      💬 Add Confluence comment to {
+                        useIndividualSelection 
+                          ? Object.values(pageCommentDestinations).filter(d => d?.confluence).length 
+                          : pages.length
+                      } page{useIndividualSelection 
+                        ? Object.values(pageCommentDestinations).filter(d => d?.confluence).length !== 1 ? 's' : '' 
+                        : pages.length !== 1 ? 's' : ''}
+                    </li>
+                  )}
+                </ul>
+              </div>
+            )}
+
+            {pagesWithoutTickets.length > 0 && (
+              <div className="bulk-edit-warning">
+                <p>
+                  ⚠️ {pagesWithoutTickets.length} page{pagesWithoutTickets.length !== 1 ? 's' : ''} {pagesWithoutTickets.length === 1 ? 'does' : 'do'} not have Jira tickets and will only be affected by location changes.
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="modal-actions">
+            <button className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+              Cancel
+            </button>
+            <button 
+              className="btn btn-primary" 
+              onClick={handleConfirm} 
+              disabled={loading || !hasChanges}
+              title={!hasChanges ? 'Please make at least one change' : ''}
+            >
+              {loading ? 'Applying...' : hasChanges ? 'Apply Changes' : 'No Changes'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// LaunchNotes Import Modal Component
+const LaunchNotesImportModal = ({ pages, onConfirm, onCancel, loading }) => {
+  const [pageContents, setPageContents] = useState({});
+  const [loadingContents, setLoadingContents] = useState(true);
+  const [importMode, setImportMode] = useState('full'); // 'full' or 'select'
+
+  useEffect(() => {
+    const loadPageContents = async () => {
+      setLoadingContents(true);
+      const contents = {};
+      
+      for (const page of pages) {
+        try {
+          const response = await authenticatedFetch(`/api/pages/${page.id}/content`);
+          const data = await response.json();
+          contents[page.id] = data;
+        } catch (err) {
+          console.error(`Failed to load content for page ${page.id}:`, err);
+          contents[page.id] = { error: err.message };
+        }
+      }
+      
+      setPageContents(contents);
+      setLoadingContents(false);
+    };
+    
+    loadPageContents();
+  }, [pages]);
+
+  const handleConfirm = async () => {
+    const results = [];
+    
+    for (const page of pages) {
+      const content = pageContents[page.id];
+      if (content && !content.error) {
+        try {
+          const response = await authenticatedFetch('/api/launchnotes/create-draft', {
+            method: 'POST',
+            body: JSON.stringify({
+              pageId: page.id,
+              title: page.title,
+              content: content.bodyStorage,
+              selectedSections: importMode === 'select' ? [] : null
+            })
+          });
+          
+          const data = await response.json();
+          results.push({ page, success: true, draft: data.draft });
+        } catch (err) {
+          results.push({ page, success: false, error: err.message });
+        }
+      } else {
+        results.push({ page, success: false, error: content?.error || 'Failed to load content' });
+      }
+    }
+    
+    onConfirm(results);
+  };
+
+  if (loadingContents) {
+    return (
+      <div className="modal-overlay" onClick={onCancel}>
+        <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+          <div className="modal-header">
+            <h2>🚀 Add to LaunchNotes</h2>
+            <button className="close-btn" onClick={onCancel}>×</button>
+          </div>
+          <div className="modal-body">
+            <div className="detail-loading">
+              <span className="spinner"></span> Loading page contents...
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>🚀 Add {pages.length} Page{pages.length !== 1 ? 's' : ''} to LaunchNotes</h2>
+          <button className="close-btn" onClick={onCancel}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className="launchnotes-import-content">
+            <div className="import-mode-selector">
+              <label className="import-mode-label">Import Mode:</label>
+              <div className="import-mode-options">
+                <button
+                  type="button"
+                  className={`import-mode-btn ${importMode === 'full' ? 'active' : ''}`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    console.log('[LaunchNotes] Full Content button clicked!');
+                    handleModeChange('full');
+                  }}
+                >
+                  📄 Full Content
+                </button>
+                <button
+                  type="button"
+                  className={`import-mode-btn ${importMode === 'select' ? 'active' : ''}`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    console.log('[LaunchNotes] Select Sections button clicked!');
+                    handleModeChange('select');
+                  }}
+                >
+                  ✂️ Select Sections
+                </button>
+              </div>
+            </div>
+
+            <div className="pages-preview-list">
+              {pages.map(page => {
+                const content = pageContents[page.id];
+                return (
+                  <div key={page.id} className="page-preview-item">
+                    <h4>{page.title}</h4>
+                    {content?.error ? (
+                      <p className="error-text">⚠️ Error loading content: {content.error}</p>
+                    ) : (
+                      <div className="content-preview">
+                        <p className="preview-text">
+                          {content?.bodyStorage 
+                            ? `${content.bodyStorage.replace(/<[^>]+>/g, ' ').substring(0, 200)}...` 
+                            : 'No content available'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+                Cancel
+              </button>
+              <button 
+                className="btn btn-primary" 
+                onClick={handleConfirm} 
+                disabled={loading}
+              >
+                {loading ? 'Creating Drafts...' : `Create ${pages.length} Draft${pages.length !== 1 ? 's' : ''}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Standalone Jira Comment Modal (for adding comments without moving)
+const JiraCommentModal = ({ page, jiraData: initialJiraData, onConfirm, onCancel, loading }) => {
+  const [jiraComment, setJiraComment] = useState('');
+  const [selectedLabels, setSelectedLabels] = useState([]);
+  const [mentions, setMentions] = useState([]);
+  const [jiraData, setJiraData] = useState(initialJiraData);
+  const [jiraLoading, setJiraLoading] = useState(false);
+
+  useEffect(() => {
+    if (page?.jiraTicket && !jiraData) {
+      setJiraLoading(true);
+      authenticatedFetch(`/api/jira/issue/${page.jiraTicket}`)
+        .then(res => res.json())
+        .then(data => {
+          if (!data.error) {
+            setJiraData(data);
+          }
+        })
+        .catch(err => console.error('Failed to load Jira data:', err))
+        .finally(() => setJiraLoading(false));
+    }
+  }, [page?.jiraTicket, jiraData]);
+
+  const handleMentionClick = (user) => {
+    const mentionText = `@${user.displayName} `;
+    setJiraComment(prev => prev + mentionText);
+    
+    if (!mentions.find(m => m.accountId === user.accountId)) {
+      setMentions(prev => [...prev, {
+        accountId: user.accountId,
+        displayName: user.displayName
+      }]);
+    }
+  };
+
+  const handleConfirm = () => {
+    const commentData = jiraComment.trim() ? {
+      body: jiraComment,
+      mentions: mentions
+    } : null;
+    
+    onConfirm(commentData, selectedLabels.length > 0 ? selectedLabels : null);
+  };
+
+  if (!page?.jiraTicket) {
+    return (
+      <div className="modal-overlay" onClick={onCancel}>
+        <div className="modal modal-sm" onClick={e => e.stopPropagation()}>
+          <div className="modal-header">
+            <h2>No Jira Ticket</h2>
+            <button className="close-btn" onClick={onCancel}>×</button>
+          </div>
+          <div className="modal-body">
+            <p>This page does not have a Jira ticket associated with it.</p>
+            <div className="modal-actions">
+              <button className="btn btn-primary" onClick={onCancel}>Close</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Add Comment to {page.jiraTicket}</h2>
+          <button className="close-btn" onClick={onCancel}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className="move-confirm-content">
+            <div className="move-confirm-page-info">
+              <h3>{page.title}</h3>
+            </div>
+
+            {jiraLoading ? (
+              <div className="detail-loading">
+                <span className="spinner"></span> Loading Jira data...
+              </div>
+            ) : jiraData && (
+              <div className="move-confirm-section">
+                <h3>Jira Ticket Details</h3>
+                <div className="jira-ticket-details">
+                  <div className="jira-header">
+                    <a 
+                      href={jiraData.url} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="jira-key"
+                    >
+                      {jiraData.key}
+                    </a>
+                    <span 
+                      className="jira-status"
+                      style={{ backgroundColor: getStatusColor(jiraData.status?.category) }}
+                    >
+                      {jiraData.status?.name}
+                    </span>
+                  </div>
+                  <p className="jira-summary">{jiraData.summary}</p>
+                  
+                  {jiraData.assignee && (
+                    <div className="jira-detail-item">
+                      <span className="jira-detail-label">Assignee</span>
+                      <span className="jira-detail-value">
+                        <button
+                          className="jira-user-clickable"
+                          onClick={() => handleMentionClick(jiraData.assignee)}
+                          title="Click to @ mention"
+                        >
+                          <span className="user-badge">
+                            {jiraData.assignee.avatarUrl && (
+                              <img src={jiraData.assignee.avatarUrl} alt="" className="user-avatar" />
+                            )}
+                            {jiraData.assignee.displayName}
+                          </span>
+                        </button>
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="move-confirm-section">
+              <div className="jira-comment-section">
+                <div className="jira-comment-header">
+                  <label className="jira-comment-label">Comment</label>
+                  <div className="comment-toolbar">
+                    {page?.url && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm comment-toolbar-btn"
+                        onClick={() => {
+                          const pageLink = `(${page.url})`;
+                          setJiraComment(prev => prev + (prev.trim() ? ' ' : '') + pageLink);
+                        }}
+                        title="Insert Confluence page link"
+                      >
+                        📄 Insert Page Link
+                      </button>
+                    )}
+                    {jiraData && (
+                      <QuickCommentMenu
+                        jiraData={jiraData}
+                        page={page}
+                        onSelect={(template) => setJiraComment(template)}
+                        mentions={mentions}
+                        setMentions={setMentions}
+                      />
+                    )}
+                  </div>
+                </div>
+                <MentionInput
+                  value={jiraComment}
+                  onChange={setJiraComment}
+                  placeholder="Add a comment to the Jira ticket... (use @ to mention someone)"
+                  onSubmit={handleConfirm}
+                  disabled={loading}
+                />
+                <div className="jira-comment-hint">
+                  💡 Click on Assignee above to automatically @ mention them
+                </div>
+              </div>
+
+              <div className="jira-labels-section">
+                <LabelSelector
+                  selectedLabels={selectedLabels}
+                  onChange={setSelectedLabels}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="modal-actions">
+            <button className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" onClick={handleConfirm} disabled={loading || !jiraComment.trim()}>
+              {loading ? 'Posting...' : 'Post Comment'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Enhanced Move Confirmation Modal with Jira comment support
+const MoveConfirmModal = ({ page, targetStatus, statuses, onConfirm, onCancel, loading, addComment }) => {
+  const [jiraData, setJiraData] = useState(null);
+  const [jiraLoading, setJiraLoading] = useState(false);
+  const [jiraError, setJiraError] = useState(null);
+  const [jiraComment, setJiraComment] = useState('');
+  const [selectedLabels, setSelectedLabels] = useState([]);
+  const [pageBody, setPageBody] = useState(null);
+  const [pageBodyLoading, setPageBodyLoading] = useState(false);
+  const [showPageBody, setShowPageBody] = useState(false);
+  const [mentions, setMentions] = useState([]);
+
+  const targetStatusConfig = statuses[targetStatus];
+
+  useEffect(() => {
+    if (page?.jiraTicket) {
+      setJiraLoading(true);
+      setJiraError(null);
+      authenticatedFetch(`/api/jira/issue/${page.jiraTicket}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            setJiraError(data.details || data.error);
+          } else {
+            setJiraData(data);
+          }
+        })
+        .catch(err => setJiraError(err.message))
+        .finally(() => setJiraLoading(false));
+    } else {
+      setJiraData(null);
+    }
+  }, [page?.jiraTicket]);
+
+  const fetchPageBody = useCallback(async () => {
+    if (pageBody !== null) {
+      setShowPageBody(!showPageBody);
+      return;
+    }
+    
+    setPageBodyLoading(true);
+    try {
+      const response = await authenticatedFetch(`/api/pages/${page.id}`);
+      const data = await response.json();
+      if (data.error) {
+        setPageBody('<p>Error loading page content</p>');
+      } else {
+        setPageBody(data.body || '<p>No content available</p>');
+        setShowPageBody(true);
+      }
+    } catch (err) {
+      setPageBody('<p>Error loading page content</p>');
+      setShowPageBody(true);
+    } finally {
+      setPageBodyLoading(false);
+    }
+  }, [page?.id, pageBody, showPageBody]);
+
+  const handleMentionClick = (user) => {
+    const mentionText = `@${user.displayName} `;
+    setJiraComment(prev => prev + mentionText);
+    
+    // Track mention for API
+    if (!mentions.find(m => m.accountId === user.accountId)) {
+      setMentions(prev => [...prev, {
+        accountId: user.accountId,
+        displayName: user.displayName
+      }]);
+    }
+  };
+
+  const handleConfirm = () => {
+    const commentData = jiraComment.trim() ? {
+      body: jiraComment,
+      mentions: mentions
+    } : null;
+    
+    // If addComment is true, we're just adding a comment without moving
+    if (addComment) {
+      onConfirm(commentData, selectedLabels.length > 0 ? selectedLabels : null);
+    } else {
+      onConfirm(commentData, selectedLabels.length > 0 ? selectedLabels : null);
+    }
+  };
+
+  // If addComment is true, show a simplified version focused on commenting
+  if (addComment) {
+    return (
+      <div className="modal-overlay" onClick={onCancel}>
+        <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+          <div className="modal-header">
+            <h2>Add Comment to {page.jiraTicket}</h2>
+            <button className="close-btn" onClick={onCancel}>×</button>
+          </div>
+          <div className="modal-body">
+            <div className="move-confirm-content">
+              <div className="move-confirm-page-info">
+                <h3>{page.title}</h3>
+              </div>
+
+              {jiraData && (
+                <div className="move-confirm-section">
+                  <h3>Jira Ticket Details</h3>
+                  <div className="jira-ticket-details">
+                    <div className="jira-header">
+                      <a 
+                        href={jiraData.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="jira-key"
+                      >
+                        {jiraData.key}
+                      </a>
+                      <span 
+                        className="jira-status"
+                        style={{ backgroundColor: getStatusColor(jiraData.status?.category) }}
+                      >
+                        {jiraData.status?.name}
+                      </span>
+                    </div>
+                    <p className="jira-summary">{jiraData.summary}</p>
+                    
+                    {jiraData.assignee && (
+                      <div className="jira-detail-item">
+                        <span className="jira-detail-label">Assignee</span>
+                        <span className="jira-detail-value">
+                          <button
+                            className="jira-user-clickable"
+                            onClick={() => handleMentionClick(jiraData.assignee)}
+                            title="Click to @ mention"
+                          >
+                            <span className="user-badge">
+                              {jiraData.assignee.avatarUrl && (
+                                <img src={jiraData.assignee.avatarUrl} alt="" className="user-avatar" />
+                              )}
+                              {jiraData.assignee.displayName}
+                            </span>
+                          </button>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="move-confirm-section">
+                <div className="jira-comment-section">
+                  <div className="jira-comment-header">
+                    <label className="jira-comment-label">Comment</label>
+                    <div className="comment-toolbar">
+                      {page?.url && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm comment-toolbar-btn"
+                          onClick={() => {
+                            const pageLink = `(${page.url})`;
+                            setJiraComment(prev => prev + (prev.trim() ? ' ' : '') + pageLink);
+                          }}
+                          title="Insert Confluence page link"
+                        >
+                          📄 Insert Page Link
+                        </button>
+                      )}
+                      {jiraData && (
+                        <QuickCommentMenu
+                          jiraData={jiraData}
+                          page={page}
+                          onSelect={(template) => setJiraComment(template)}
+                          mentions={mentions}
+                          setMentions={setMentions}
+                        />
+                      )}
+                    </div>
+                  </div>
+                  <MentionInput
+                    value={jiraComment}
+                    onChange={setJiraComment}
+                    placeholder="Add a comment to the Jira ticket... (use @ to mention someone)"
+                    onSubmit={handleConfirm}
+                    disabled={loading}
+                  />
+                  <div className="jira-comment-hint">
+                    💡 Click on Assignee above to automatically @ mention them
+                  </div>
+                </div>
+
+                <div className="jira-labels-section">
+                  <LabelSelector
+                    selectedLabels={selectedLabels}
+                    onChange={setSelectedLabels}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" onClick={handleConfirm} disabled={loading || !jiraComment.trim()}>
+                {loading ? 'Posting...' : 'Post Comment'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Are you sure you want to move this page to {targetStatusConfig?.name}?</h2>
+          <button className="close-btn" onClick={onCancel}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className="move-confirm-content">
+            <div className="move-confirm-page-info">
+              <h3>{page.title}</h3>
+              <p className="move-confirm-message">
+                This will move the page "{page.title}" to <strong>{targetStatusConfig?.name}</strong>.
+              </p>
+            </div>
+
+            {/* Page Body (Expandable) */}
+            <div className="move-confirm-section">
+              <button 
+                className="btn btn-secondary btn-sm"
+                onClick={fetchPageBody}
+                disabled={pageBodyLoading}
+              >
+                {pageBodyLoading ? (
+                  <>Loading...</>
+                ) : showPageBody ? (
+                  <>▼ Hide Page Content</>
+                ) : (
+                  <>▶ Show Page Content</>
+                )}
+              </button>
+              {showPageBody && pageBody && (
+                <div 
+                  className="page-body-content move-page-body"
+                  dangerouslySetInnerHTML={{ __html: pageBody }}
+                />
+              )}
+            </div>
+
+            {/* Jira Ticket Section */}
+            {page.jiraTicket && (
+              <div className="move-confirm-section">
+                <h3>Leave a comment on Jira ticket</h3>
+                
+                {jiraLoading ? (
+                  <div className="detail-loading">
+                    <span className="spinner"></span> Loading Jira data...
+                  </div>
+                ) : jiraError ? (
+                  <div className="detail-error">
+                    <span>⚠️ {jiraError}</span>
+                    <p>You can still leave a comment below.</p>
+                  </div>
+                ) : jiraData ? (
+                  <div className="jira-ticket-details">
+                    <div className="jira-header">
+                      <a 
+                        href={jiraData.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="jira-key"
+                      >
+                        {jiraData.key}
+                      </a>
+                      <span 
+                        className="jira-status"
+                        style={{ backgroundColor: getStatusColor(jiraData.status?.category) }}
+                      >
+                        {jiraData.status?.name}
+                      </span>
+                    </div>
+                    <p className="jira-summary">{jiraData.summary}</p>
+                    
+                    <div className="jira-details-grid">
+                      {shouldShowField('assignee') && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Assignee</span>
+                          <span className="jira-detail-value">
+                            {jiraData.assignee ? (
+                              <button
+                                className="jira-user-clickable"
+                                onClick={() => handleMentionClick(jiraData.assignee)}
+                                title="Click to @ mention"
+                              >
+                                <span className="user-badge">
+                                  {jiraData.assignee.avatarUrl && (
+                                    <img src={jiraData.assignee.avatarUrl} alt="" className="user-avatar" />
+                                  )}
+                                  {jiraData.assignee.displayName}
+                                </span>
+                              </button>
+                            ) : (
+                              <span className="unassigned">Unassigned</span>
+                            )}
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('reporter') && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Reporter</span>
+                          <span className="jira-detail-value">
+                            {jiraData.reporter ? (
+                              <button
+                                className="jira-user-clickable"
+                                onClick={() => handleMentionClick(jiraData.reporter)}
+                                title="Click to @ mention"
+                              >
+                                <span className="user-badge">
+                                  {jiraData.reporter.avatarUrl && (
+                                    <img src={jiraData.reporter.avatarUrl} alt="" className="user-avatar" />
+                                  )}
+                                  {jiraData.reporter.displayName}
+                                </span>
+                              </button>
+                            ) : '—'}
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('labels') && jiraData.labels && jiraData.labels.length > 0 && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Current Labels</span>
+                          <span className="jira-detail-value">
+                            <div className="jira-labels">
+                              {jiraData.labels.map(label => (
+                                <span key={label} className="jira-label">{label}</span>
+                              ))}
+                            </div>
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('roadmapStatus') && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Roadmap Status</span>
+                          <span className="jira-detail-value">
+                            {jiraData.roadmapStatus || '—'}
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('priority') && jiraData.priority && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Priority</span>
+                          <span className="jira-detail-value">
+                            <span className="priority-badge">
+                              {jiraData.priority.iconUrl && (
+                                <img src={jiraData.priority.iconUrl} alt="" className="priority-icon" />
+                              )}
+                              {jiraData.priority.name}
+                            </span>
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('dueDate') && jiraData.dueDate && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Due Date</span>
+                          <span className="jira-detail-value">
+                            {new Date(jiraData.dueDate).toLocaleDateString()}
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('fixVersions') && jiraData.fixVersions && jiraData.fixVersions.length > 0 && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Fix Versions</span>
+                          <span className="jira-detail-value">
+                            {jiraData.fixVersions.join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('components') && jiraData.components && jiraData.components.length > 0 && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Components</span>
+                          <span className="jira-detail-value">
+                            {jiraData.components.join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('issueType') && jiraData.issueType && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Issue Type</span>
+                          <span className="jira-detail-value">
+                            {jiraData.issueType.name}
+                          </span>
+                        </div>
+                      )}
+                      {shouldShowField('epicKey') && jiraData.epicKey && (
+                        <div className="jira-detail-item">
+                          <span className="jira-detail-label">Epic Key</span>
+                          <span className="jira-detail-value">
+                            {jiraData.epicKey}
+                          </span>
+                        </div>
+                      )}
+                      {/* Display custom fields if they exist */}
+                      {jiraData.customFields && Object.keys(jiraData.customFields).map(fieldKey => {
+                        const field = jiraData.customFields[fieldKey];
+                        // Show custom fields by default (user can't hide them in preferences yet)
+                        if (field && field.value) {
+                          return (
+                            <div key={fieldKey} className="jira-detail-item">
+                              <span className="jira-detail-label">{field.name}</span>
+                              <span className="jira-detail-value">
+                                {Array.isArray(field.value) ? field.value.join(', ') : String(field.value)}
+                              </span>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="jira-comment-section">
+                  <div className="jira-comment-header">
+                    <label className="jira-comment-label">Comment (optional)</label>
+                    <div className="comment-toolbar">
+                      {page?.url && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm comment-toolbar-btn"
+                          onClick={() => {
+                            const pageLink = `(${page.url})`;
+                            setJiraComment(prev => prev + (prev.trim() ? ' ' : '') + pageLink);
+                          }}
+                          title="Insert Confluence page link"
+                        >
+                          📄 Insert Page Link
+                        </button>
+                      )}
+                      <QuickCommentMenu
+                        jiraData={jiraData}
+                        page={page}
+                        onSelect={(template) => setJiraComment(template)}
+                        mentions={mentions}
+                        setMentions={setMentions}
+                      />
+                    </div>
+                  </div>
+                  <MentionInput
+                    value={jiraComment}
+                    onChange={setJiraComment}
+                    placeholder="Add a comment to the Jira ticket... (use @ to mention someone)"
+                    onSubmit={handleConfirm}
+                    disabled={loading}
+                  />
+                  <div className="jira-comment-hint">
+                    💡 Click on Assignee or Reporter above to automatically @ mention them
+                  </div>
+                </div>
+
+                <div className="jira-labels-section">
+                  <LabelSelector
+                    selectedLabels={selectedLabels}
+                    onChange={setSelectedLabels}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="modal-actions">
+            <button className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" onClick={handleConfirm} disabled={loading}>
+              {loading ? 'Moving...' : `Move to ${targetStatusConfig?.name}`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Troubleshooting Panel Component
+const TroubleshootingPanel = ({ onClose }) => {
+  const [logs, setLogs] = useState([]);
+  const [selectedLog, setSelectedLog] = useState(null);
+  const [filter, setFilter] = useState('all'); // 'all', 'errors', 'success'
+  const [searchTerm, setSearchTerm] = useState('');
+
+  useEffect(() => {
+    // Set up callback for log updates
+    window.debugLogUpdateCallback = () => {
+      setLogs(getDebugLogs());
+    };
+    
+    // Initial load
+    setLogs(getDebugLogs());
+    
+    // Poll for updates
+    const interval = setInterval(() => {
+      setLogs(getDebugLogs());
+    }, 500);
+    
+    return () => {
+      clearInterval(interval);
+      window.debugLogUpdateCallback = null;
+    };
+  }, []);
+
+  const filteredLogs = logs.filter(log => {
+    const matchesFilter = filter === 'all' || 
+      (filter === 'errors' && (log.error || (log.status && log.status >= 400))) ||
+      (filter === 'success' && !log.error && log.status && log.status < 400);
+    
+    const matchesSearch = !searchTerm || 
+      log.url.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      JSON.stringify(log.request).toLowerCase().includes(searchTerm.toLowerCase()) ||
+      JSON.stringify(log.response).toLowerCase().includes(searchTerm.toLowerCase());
+    
+    return matchesFilter && matchesSearch;
+  });
+
+  const handleClear = () => {
+    clearDebugLogs();
+    setLogs([]);
+    setSelectedLog(null);
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal modal-xl troubleshooting-modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>🔍 Troubleshooting Panel</h2>
+          <div className="troubleshooting-header-actions">
+            <button className="btn btn-secondary btn-sm" onClick={handleClear}>
+              Clear Logs
+            </button>
+            <button className="close-btn" onClick={onClose}>×</button>
+          </div>
+        </div>
+        
+        <div className="troubleshooting-body">
+          <div className="troubleshooting-sidebar">
+            <div className="troubleshooting-filters">
+              <input
+                type="text"
+                className="troubleshooting-search"
+                placeholder="Search logs..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+              <div className="troubleshooting-filter-buttons">
+                <button
+                  className={`filter-btn ${filter === 'all' ? 'active' : ''}`}
+                  onClick={() => setFilter('all')}
+                >
+                  All ({logs.length})
+                </button>
+                <button
+                  className={`filter-btn ${filter === 'errors' ? 'active' : ''}`}
+                  onClick={() => setFilter('errors')}
+                >
+                  Errors ({logs.filter(l => l.error || (l.status && l.status >= 400)).length})
+                </button>
+                <button
+                  className={`filter-btn ${filter === 'success' ? 'active' : ''}`}
+                  onClick={() => setFilter('success')}
+                >
+                  Success ({logs.filter(l => !l.error && l.status && l.status < 400).length})
+                </button>
+              </div>
+            </div>
+            
+            <div className="troubleshooting-log-list">
+              {filteredLogs.length === 0 ? (
+                <div className="troubleshooting-empty">No logs found</div>
+              ) : (
+                filteredLogs.map(log => (
+                  <div
+                    key={log.id}
+                    className={`troubleshooting-log-item ${selectedLog?.id === log.id ? 'selected' : ''} ${log.error || (log.status && log.status >= 400) ? 'error' : ''}`}
+                    onClick={() => setSelectedLog(log)}
+                  >
+                    <div className="log-item-method">{log.method}</div>
+                    <div className="log-item-url">{log.url}</div>
+                    <div className="log-item-meta">
+                      <span className={`log-status status-${log.status ? Math.floor(log.status / 100) : 'unknown'}`}>
+                        {log.status || 'Pending'}
+                      </span>
+                      {log.duration && <span className="log-duration">{log.duration}ms</span>}
+                      <span className="log-time">
+                        {new Date(log.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          
+          <div className="troubleshooting-detail">
+            {selectedLog ? (
+              <div className="troubleshooting-detail-content">
+                <div className="detail-section">
+                  <div className="detail-section-header">
+                    <h3>Request</h3>
+                    <button 
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => copyToClipboard(JSON.stringify(selectedLog.request, null, 2))}
+                    >
+                      Copy JSON
+                    </button>
+                  </div>
+                  <div className="detail-info">
+                    <div className="detail-info-row">
+                      <span className="detail-label">Method:</span>
+                      <span className="detail-value">{selectedLog.method}</span>
+                    </div>
+                    <div className="detail-info-row">
+                      <span className="detail-label">URL:</span>
+                      <span className="detail-value">{selectedLog.url}</span>
+                    </div>
+                    <div className="detail-info-row">
+                      <span className="detail-label">Timestamp:</span>
+                      <span className="detail-value">{new Date(selectedLog.timestamp).toLocaleString()}</span>
+                    </div>
+                    {selectedLog.duration && (
+                      <div className="detail-info-row">
+                        <span className="detail-label">Duration:</span>
+                        <span className="detail-value">{selectedLog.duration}ms</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="detail-json">
+                    <pre>{JSON.stringify(selectedLog.request, null, 2)}</pre>
+                  </div>
+                </div>
+                
+                {selectedLog.response && (
+                  <div className="detail-section">
+                    <div className="detail-section-header">
+                      <h3>Response</h3>
+                      <button 
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => copyToClipboard(JSON.stringify(selectedLog.response, null, 2))}
+                      >
+                        Copy JSON
+                      </button>
+                    </div>
+                    <div className="detail-info">
+                      <div className="detail-info-row">
+                        <span className="detail-label">Status:</span>
+                        <span className={`detail-value status-${Math.floor(selectedLog.response.status / 100)}`}>
+                          {selectedLog.response.status} {selectedLog.response.statusText}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="detail-json">
+                      <pre>{JSON.stringify(selectedLog.response, null, 2)}</pre>
+                    </div>
+                  </div>
+                )}
+                
+                {selectedLog.error && (
+                  <div className="detail-section detail-section-error">
+                    <div className="detail-section-header">
+                      <h3>Error</h3>
+                      <button 
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => copyToClipboard(JSON.stringify(selectedLog.error, null, 2))}
+                      >
+                        Copy JSON
+                      </button>
+                    </div>
+                    <div className="detail-json error-json">
+                      <pre>{JSON.stringify(selectedLog.error, null, 2)}</pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="troubleshooting-empty-detail">
+                Select a log entry to view details
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Toast notification component
+const Toast = ({ message, type, onClose, onUndo, undoLabel = 'Undo' }) => {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 6000); // Longer timeout if undo is available
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  const icons = {
+    success: '✓',
+    error: '✕',
+    info: 'ℹ'
+  };
+
+  return (
+    <div className={`toast ${type}`}>
+      <span className="toast-icon">{icons[type]}</span>
+      <span className="toast-message">{message}</span>
+      {onUndo && (
+        <button className="toast-undo" onClick={onUndo}>
+          {undoLabel}
+        </button>
+      )}
+    </div>
+  );
+};
+
+// My Tasks View Component (Asana/Monday.com style)
+const MyTasksView = ({ tasksByStatus, statuses, onPageClick, onMove, onViewComments, loading, isPageAssignedToMe, assignPageToMe, unassignPageFromMe }) => {
+  if (loading) {
+    return (
+      <div className="loading-state full">
+        <div className="spinner large"></div>
+        <span>Loading your tasks...</span>
+      </div>
+    );
+  }
+
+  const totalTasks = Object.values(tasksByStatus).reduce((sum, tasks) => sum + tasks.length, 0);
+
+  if (totalTasks === 0) {
+    return (
+      <div className="empty-state full">
+        <span className="empty-icon">✅</span>
+        <h3>No tasks assigned to you</h3>
+        <p>Assign release notes to yourself using "Assign to me" in the page menu to see them here</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="my-tasks-view">
+      <div className="my-tasks-header">
+        <div className="my-tasks-user">
+          <div>
+            <h2>My Tasks</h2>
+            <p className="my-tasks-subtitle">
+              {totalTasks} release note{totalTasks !== 1 ? 's' : ''} assigned to you
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="my-tasks-sections">
+        {Object.entries(statuses).map(([statusKey, status]) => {
+          const tasks = tasksByStatus[statusKey] || [];
+          if (tasks.length === 0) return null;
+
+          return (
+            <div key={statusKey} className="my-tasks-section">
+              <div className="my-tasks-section-header" style={{ '--section-color': status.color }}>
+                <div className="section-header-left">
+                  <span className="section-icon">{status.icon}</span>
+                  <h3 className="section-title">{status.name}</h3>
+                  <span className="section-count">{tasks.length}</span>
+                </div>
+              </div>
+              
+              <div className="my-tasks-list">
+                {tasks.map(page => (
+                  <div 
+                    key={page.id} 
+                    className={`my-task-card ${page.isStale ? 'stale' : ''}`}
+                    onClick={() => onPageClick(page)}
+                  >
+                    <div className="task-card-header">
+                      <div className="task-title-row">
+                        <h4 className="task-title">{page.title}</h4>
+                        <span className="assigned-badge" title="Assigned to you">
+                          ✅
+                        </span>
+                      </div>
+                      {page.isStale && (
+                        <span className="task-stale-badge" title={`No activity for ${status.staleThreshold}+ days`}>
+                          ⚠️ Stale
+                        </span>
+                      )}
+                    </div>
+                    
+                    <div className="task-card-meta">
+                      <div className="task-meta-row">
+                        <span className="task-meta-item">
+                          <span className="task-meta-label">Jira:</span>
+                          {page.jiraTicket ? (
+                            <a 
+                              href={page.jiraUrl} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              className="task-jira-link"
+                              onClick={e => e.stopPropagation()}
+                            >
+                              {page.jiraTicket}
+                            </a>
+                          ) : (
+                            <span className="task-no-jira">—</span>
+                          )}
+                        </span>
+                        <span className="task-meta-item">
+                          <span className="task-meta-label">Last Activity:</span>
+                          <StatusBadge days={page.lastActivityDaysAgo} threshold={status.staleThreshold} />
+                        </span>
+                      </div>
+                      
+                      <div className="task-meta-row">
+                        <span className="task-meta-item">
+                          <span className="task-meta-label">Comments:</span>
+                          <button 
+                            className="task-comment-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onViewComments(page);
+                            }}
+                          >
+                            💬 {page.commentCount || 0}
+                          </button>
+                        </span>
+                        <span className="task-meta-item">
+                          <span className="task-meta-label">Created:</span>
+                          <StatusBadge days={page.createdDaysAgo} threshold={60} />
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="task-card-actions">
+                      <button 
+                        className="btn btn-secondary btn-sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onPageClick(page);
+                        }}
+                      >
+                        View Details
+                      </button>
+                      <OverflowMenu 
+                        page={page}
+                        statuses={statuses}
+                        currentStatus={statusKey}
+                        onMove={onMove}
+                        onViewComments={onViewComments}
+                        isAssigned={isPageAssignedToMe(page.id)}
+                        onAssign={assignPageToMe}
+                        onUnassign={unassignPageFromMe}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// Bulk actions bar
+const BulkActionsBar = ({ selectedCount, onEdit, onClearSelection }) => {
+  if (selectedCount === 0) return null;
+
+  return (
+    <div className="bulk-actions-bar">
+      <span className="bulk-count">{selectedCount} selected</span>
+      <div className="bulk-actions">
+        <button 
+          className="btn btn-primary btn-sm"
+          onClick={onEdit}
+        >
+          ✏️ Edit
+        </button>
+        <button className="btn btn-secondary btn-sm" onClick={onClearSelection}>
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+};
+
+function App() {
+  const [pages, setPages] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [config, setConfig] = useState(null);
+  const [currentStatus, setCurrentStatus] = useState('draft');
+  const [selectedPage, setSelectedPage] = useState(null);
+  const [comments, setComments] = useState([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentType, setCommentType] = useState('confluence'); // 'confluence' or 'jira'
+  const [confirmAction, setConfirmAction] = useState(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const [detailPage, setDetailPage] = useState(null); // Page shown in detail panel
+  const [searchTerm, setSearchTerm] = useState('');
+  const [sortColumn, setSortColumn] = useState('createdDaysAgo');
+  const [sortDirection, setSortDirection] = useState('asc');
+  const [selectedPages, setSelectedPages] = useState(new Set());
+  const [stats, setStats] = useState(null);
+  const [authorFilter, setAuthorFilter] = useState('');
+  const [timeFilter, setTimeFilter] = useState(''); // '', 'today', 'thisWeek', 'thisMonth'
+  const [showSettings, setShowSettings] = useState(false);
+  const [showTroubleshooting, setShowTroubleshooting] = useState(false);
+  const [lastMove, setLastMove] = useState(null); // Track last move for undo
+  const [autoRefresh, setAutoRefresh] = useState(() => {
+    const saved = localStorage.getItem('autoRefresh');
+    return saved ? parseInt(saved, 10) : 0; // 0 = disabled, value in seconds
+  });
+  const [autoRefreshInterval, setAutoRefreshInterval] = useState(null);
+  const [currentView, setCurrentView] = useState('status'); // 'status' or 'myTasks'
+  const [currentUser, setCurrentUser] = useState(null);
+  const [myTasks, setMyTasks] = useState([]);
+  const [myTasksLoading, setMyTasksLoading] = useState(false);
+  const [myTasksByStatus, setMyTasksByStatus] = useState({});
+  const [notifications, setNotifications] = useState([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [readNotificationIds, setReadNotificationIds] = useState(() => {
+    const saved = localStorage.getItem('readNotifications');
+    return saved ? new Set(JSON.parse(saved)) : new Set();
+  });
+  const [lastNotificationCheck, setLastNotificationCheck] = useState(() => {
+    const saved = localStorage.getItem('lastNotificationCheck');
+    return saved || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  });
+  const [assignedPageIds, setAssignedPageIds] = useState(() => {
+    const saved = localStorage.getItem('assignedPageIds');
+    return saved ? new Set(JSON.parse(saved)) : new Set();
+  });
+  const lastAssignedIdsRef = React.useRef('');
+  
+  // Check for credentials on mount
+  useEffect(() => {
+    if (!hasCredentials()) {
+      setShowSettings(true);
+    }
+  }, []);
+
+  // Save assigned pages to localStorage whenever it changes
+  useEffect(() => {
+    localStorage.setItem('assignedPageIds', JSON.stringify(Array.from(assignedPageIds)));
+  }, [assignedPageIds]);
+
+  const statuses = config?.statuses || {};
+  const currentStatusConfig = statuses[currentStatus];
+
+  const addToast = useCallback((message, type = 'info', undoAction = null) => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, message, type, undoAction }]);
+  }, []);
+
+  const removeToast = useCallback((id) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  // Assign page to me
+  const assignPageToMe = useCallback((pageId) => {
+    setAssignedPageIds(prev => {
+      const newSet = new Set(prev);
+      newSet.add(pageId);
+      return newSet;
+    });
+    addToast('Page assigned to you', 'success');
+  }, [addToast]);
+
+  // Unassign page from me
+  const unassignPageFromMe = useCallback((pageId) => {
+    setAssignedPageIds(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(pageId);
+      return newSet;
+    });
+    addToast('Page unassigned', 'info');
+  }, [addToast]);
+
+  // Check if page is assigned to me
+  const isPageAssignedToMe = useCallback((pageId) => {
+    return assignedPageIds.has(pageId);
+  }, [assignedPageIds]);
+
+  const handleSaveSettings = (settings) => {
+    localStorage.setItem('confluenceSettings', JSON.stringify(settings));
+    setShowSettings(false);
+    addToast('Settings saved successfully', 'success');
+    // Reload config and pages
+    fetchConfig();
+    fetchPages();
+    fetchStats();
+  };
+
+  const fetchConfig = useCallback(async () => {
+    if (!hasCredentials()) return;
+    try {
+      const response = await authenticatedFetch('/api/config');
+      const data = await response.json();
+      // Merge with saved settings
+      const creds = getCredentials();
+      if (creds) {
+        data.settings = creds;
+      }
+      setConfig(data);
+    } catch (err) {
+      console.error('Failed to fetch config:', err);
+    }
+  }, []);
+
+  const fetchStats = useCallback(async () => {
+    if (!hasCredentials()) return;
+    try {
+      const response = await authenticatedFetch('/api/pages/all');
+      const data = await response.json();
+      setStats(data.stats);
+    } catch (err) {
+      console.error('Failed to fetch stats:', err);
+    }
+  }, []);
+
+  const fetchPages = useCallback(async (status = currentStatus) => {
+    if (!hasCredentials()) return;
+    setLoading(true);
+    setError(null);
+    setSelectedPages(new Set());
+    try {
+      const response = await authenticatedFetch(`/api/pages?status=${status}`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.details || 'Failed to fetch pages');
+      }
+      const data = await response.json();
+      setPages(data.pages);
+    } catch (err) {
+      setError(err.message);
+      addToast(err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [currentStatus, addToast]);
+
+  const fetchComments = useCallback(async (pageId) => {
+    setCommentsLoading(true);
+    setCommentType('confluence');
+    try {
+      console.log(`[Client] Fetching comments for page ${pageId}`);
+      const response = await authenticatedFetch(`/api/pages/${pageId}/comments`);
+      const data = await response.json();
+      console.log(`[Client] Comments response:`, data);
+      console.log(`[Client] Comments count:`, data.comments?.length || 0, 'Total:', data.total);
+      
+      if (data.total > 0 && (!data.comments || data.comments.length === 0)) {
+        console.warn(`[Client] WARNING: API reports ${data.total} comments but returned ${data.comments?.length || 0} comments!`);
+        console.warn(`[Client] Full response:`, JSON.stringify(data, null, 2));
+      }
+      
+      setComments(data.comments || []);
+    } catch (err) {
+      console.error(`[Client] Error fetching comments:`, err);
+      addToast('Failed to load comments', 'error');
+    } finally {
+      setCommentsLoading(false);
+    }
+  }, [addToast]);
+
+  const fetchJiraComments = useCallback(async (issueKey) => {
+    setCommentsLoading(true);
+    setCommentType('jira');
+    try {
+      const response = await authenticatedFetch(`/api/jira/issue/${issueKey}/comments`);
+      const data = await response.json();
+      setComments(data.comments || []);
+    } catch (err) {
+      addToast('Failed to load Jira comments', 'error');
+      setComments([]);
+    } finally {
+      setCommentsLoading(false);
+    }
+  }, [addToast]);
+
+  const handleAddComment = useCallback(async (pageIdOrText, bodyOrParentId) => {
+    try {
+      // Check if this is a reply (parentId provided) or new comment
+      if (typeof pageIdOrText === 'string' && bodyOrParentId) {
+        // This is a reply - pageIdOrText is the pageId, bodyOrParentId is the body, third arg is parentId
+        const pageId = pageIdOrText;
+        const body = bodyOrParentId;
+        const parentId = arguments[2];
+        
+        const formattedBody = body.includes('<ac:link>') 
+          ? `<p>${body}</p>` 
+          : `<p>${body.replace(/\n/g, '</p><p>')}</p>`;
+        
+        const response = await authenticatedFetch(`/api/pages/${pageId}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({ body: formattedBody, parentId: parentId })
+        });
+        
+        if (!response.ok) throw new Error('Failed to add reply');
+        
+        addToast('Reply added successfully', 'success');
+        fetchComments(pageId);
+        fetchPages();
+      } else {
+        // This is a new comment
+        const pageId = pageIdOrText;
+        const body = bodyOrParentId;
+        
+        const formattedBody = body.includes('<ac:link>') 
+          ? `<p>${body}</p>` 
+          : `<p>${body.replace(/\n/g, '</p><p>')}</p>`;
+        
+        const response = await authenticatedFetch(`/api/pages/${pageId}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({ body: formattedBody })
+        });
+        
+        if (!response.ok) throw new Error('Failed to add comment');
+        
+        addToast('Comment added successfully', 'success');
+        fetchComments(pageId);
+        fetchPages();
+      }
+    } catch (err) {
+      addToast('Failed to add comment', 'error');
+    }
+  }, [addToast, fetchComments, fetchPages]);
+
+  // Handle Jira comment from comment modal (simple text)
+  const handleAddJiraCommentFromModal = useCallback(async (commentText, parentId = null) => {
+    if (!selectedPage?.jiraTicket) {
+      addToast('This page does not have a Jira ticket', 'error');
+      return;
+    }
+    
+    setActionLoading(true);
+    try {
+      // Extract mentions from text (@username pattern)
+      // For now, we'll let the server parse mentions from the text
+      // In a full implementation, we'd track mentions as the user types
+      const mentions = [];
+      const mentionRegex = /@([^\s@]+)/g;
+      let match;
+      while ((match = mentionRegex.exec(commentText)) !== null) {
+        // We'd need to look up the accountId for each mention
+        // For now, we'll let the server handle it
+      }
+      
+      const response = await authenticatedFetch(`/api/jira/issue/${selectedPage.jiraTicket}/comment`, {
+        method: 'POST',
+        body: JSON.stringify({
+          body: commentText,
+          mentions: mentions,
+          parentId: parentId
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.details || 'Failed to add comment');
+      }
+      
+      addToast('Comment added successfully', 'success');
+      // Refresh comments
+      if (selectedPage.jiraTicket) {
+        fetchJiraComments(selectedPage.jiraTicket);
+      }
+      fetchPages();
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [addToast, fetchPages, selectedPage, fetchJiraComments]);
+
+  // Handle Jira comment from add comment modal (with page, jiraComment object, labels)
+  const handleAddJiraComment = useCallback(async (page, jiraComment = null, labels = null) => {
+    if (!page.jiraTicket) {
+      addToast('This page does not have a Jira ticket', 'error');
+      return;
+    }
+
+    setActionLoading(true);
+    try {
+      // Use the bulk-update-jira endpoint for a single page
+      const response = await authenticatedFetch('/api/pages/bulk-update-jira', {
+        method: 'POST',
+        body: JSON.stringify({ 
+          pageIds: [page.id],
+          jiraComment: jiraComment,
+          labels: labels
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.details || 'Failed to add comment');
+      }
+      
+      const result = await response.json();
+      addToast(result.message, 'success');
+      setConfirmAction(null);
+      fetchPages();
+      fetchStats();
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [addToast, fetchPages, fetchStats]);
+
+  const handleMove = useCallback(async (page, targetStatus, jiraComment = null, labels = null) => {
+    const previousStatus = page.status || currentStatus;
+    setActionLoading(true);
+    try {
+      const response = await authenticatedFetch(`/api/pages/${page.id}/move`, {
+        method: 'POST',
+        body: JSON.stringify({ 
+          targetStatus,
+          jiraComment: jiraComment,
+          labels: labels
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.details || 'Failed to move page');
+      }
+      
+      const result = await response.json();
+      
+      // Track move for undo
+      const undoAction = async () => {
+        try {
+          await authenticatedFetch(`/api/pages/${page.id}/move`, {
+            method: 'POST',
+            body: JSON.stringify({ targetStatus: previousStatus })
+          });
+          addToast(`Moved "${page.title}" back to ${statuses[previousStatus]?.name || previousStatus}`, 'success');
+          fetchPages();
+          fetchStats();
+        } catch (err) {
+          addToast('Failed to undo move', 'error');
+        }
+      };
+      
+      setLastMove({ pageId: page.id, fromStatus: previousStatus, toStatus: targetStatus });
+      addToast(result.message, 'success', undoAction);
+      setConfirmAction(null);
+      fetchPages();
+      fetchStats();
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [addToast, fetchPages, fetchStats, currentStatus]);
+
+  const executeBulkEdit = useCallback(async (targetStatus, pageIds, jiraComment = null, confluenceComment = null, labels = null) => {
+    // Track previous statuses for undo - use pages state instead of sortedPages
+    const pagesToEdit = pages.filter(p => pageIds.includes(p.id));
+    const previousStatuses = pagesToEdit.map(p => ({ pageId: p.id, status: p.status || currentStatus }));
+    
+    setActionLoading(true);
+    try {
+      // If targetStatus is null, we're only adding labels/comments, not moving
+      if (targetStatus === null) {
+        // Only update Jira tickets (labels and comments), don't move pages
+        const pagesWithTickets = pagesToEdit.filter(p => p.jiraTicket);
+        
+        if (pagesWithTickets.length === 0 && (!labels || labels.length === 0) && (!jiraComment || !jiraComment.body) && (!confluenceComment || !confluenceComment.body)) {
+          addToast('No changes to apply', 'info');
+          setBulkEditAction(null);
+          setActionLoading(false);
+          return;
+        }
+
+        // Handle Jira comments/labels if provided
+        if ((jiraComment && jiraComment.body) || (labels && labels.length > 0)) {
+          // If using individual selection, filter pageIds to only those that should get Jira comments
+          const jiraPageIds = jiraComment?.pageMap 
+            ? pageIds.filter(pageId => jiraComment.pageMap[pageId]?.jira)
+            : pageIds;
+          
+          // Only proceed if there are pages to update
+          if (jiraPageIds.length > 0 || (labels && labels.length > 0)) {
+        const response = await authenticatedFetch('/api/pages/bulk-update-jira', {
+          method: 'POST',
+          body: JSON.stringify({ 
+                pageIds: jiraPageIds.length > 0 ? jiraPageIds : pageIds, // Use filtered IDs for comments, all for labels
+                jiraComment: jiraPageIds.length > 0 ? jiraComment : null, // Only include comment if there are pages
+            labels
+          })
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.details || 'Failed to update Jira tickets');
+        }
+        
+        const result = await response.json();
+            if (result.message) {
+        addToast(result.message, 'success');
+            }
+          }
+        }
+
+        // Handle Confluence comments if provided
+        if (confluenceComment && confluenceComment.body) {
+          const formattedBody = confluenceComment.body.includes('<ac:link>') 
+            ? `<p>${confluenceComment.body}</p>` 
+            : `<p>${confluenceComment.body.replace(/\n/g, '</p><p>')}</p>`;
+          
+          let successCount = 0;
+          let failCount = 0;
+          
+          // Determine which pages should get Confluence comments
+          const pagesToComment = confluenceComment.pageMap 
+            ? pageIds.filter(pageId => confluenceComment.pageMap[pageId]?.confluence)
+            : pageIds;
+          
+          // Add Confluence comment to each page individually
+          for (const pageId of pagesToComment) {
+            try {
+              const response = await authenticatedFetch(`/api/pages/${pageId}/comments`, {
+                method: 'POST',
+                body: JSON.stringify({ body: formattedBody })
+              });
+              
+              if (response.ok) {
+                successCount++;
+              } else {
+                failCount++;
+              }
+            } catch (err) {
+              console.error(`Failed to add Confluence comment to page ${pageId}:`, err);
+              failCount++;
+            }
+          }
+          
+          if (pagesToComment.length > 0) {
+            if (failCount === 0) {
+              addToast(`Added Confluence comment to ${successCount} page${successCount !== 1 ? 's' : ''}`, 'success');
+            } else {
+              addToast(`Added Confluence comment to ${successCount} page${successCount !== 1 ? 's' : ''}, ${failCount} failed`, 'error');
+            }
+          }
+        }
+        
+        setBulkEditAction(null);
+        fetchPages();
+        fetchStats();
+        setActionLoading(false);
+        return;
+      }
+
+      // Handle Confluence comments separately if provided (bulk-move doesn't support it)
+      if (confluenceComment && confluenceComment.body) {
+        const formattedBody = confluenceComment.body.includes('<ac:link>') 
+          ? `<p>${confluenceComment.body}</p>` 
+          : `<p>${confluenceComment.body.replace(/\n/g, '</p><p>')}</p>`;
+        
+        // Determine which pages should get Confluence comments
+        const pagesToComment = confluenceComment.pageMap 
+          ? pageIds.filter(pageId => confluenceComment.pageMap[pageId]?.confluence)
+          : pageIds;
+        
+        // Add Confluence comment to each page individually
+        for (const pageId of pagesToComment) {
+          try {
+            await authenticatedFetch(`/api/pages/${pageId}/comments`, {
+              method: 'POST',
+              body: JSON.stringify({ body: formattedBody })
+            });
+          } catch (err) {
+            console.error(`Failed to add Confluence comment to page ${pageId}:`, err);
+          }
+        }
+      }
+      
+      // Filter Jira comments if using individual selection
+      let jiraCommentToSend = jiraComment;
+      if (jiraComment?.pageMap) {
+        const jiraPageIds = pageIds.filter(pageId => jiraComment.pageMap[pageId]?.jira);
+        if (jiraPageIds.length === 0) {
+          jiraCommentToSend = null; // No pages should get Jira comments
+        } else if (jiraPageIds.length < pageIds.length) {
+          // Some pages should get comments, but not all - handle individually
+          const pagesToComment = pagesToEdit.filter(p => jiraPageIds.includes(p.id) && p.jiraTicket);
+          for (const page of pagesToComment) {
+            try {
+              await authenticatedFetch(`/api/jira/issue/${page.jiraTicket}/comment`, {
+                method: 'POST',
+                body: JSON.stringify({
+                  body: jiraComment.body,
+                  mentions: jiraComment.mentions
+                })
+              });
+            } catch (err) {
+              console.error(`Failed to add Jira comment to ${page.jiraTicket}:`, err);
+            }
+          }
+          jiraCommentToSend = null; // Already handled individually
+        }
+      }
+
+      // Use the existing bulk-move endpoint for Jira comments and moves
+      const response = await authenticatedFetch('/api/pages/bulk-move', {
+        method: 'POST',
+        body: JSON.stringify({ 
+          pageIds,
+          targetStatus,
+          jiraComment: jiraCommentToSend,
+          labels
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.details || 'Failed to move pages');
+      }
+      
+      const result = await response.json();
+      
+      // Create undo action for bulk move
+      const undoAction = async () => {
+        let successCount = 0;
+        let failCount = 0;
+        
+        // Move each page back to its previous status
+        for (const { pageId, status } of previousStatuses) {
+          const page = pagesToEdit.find(p => p.id === pageId);
+          if (page) {
+            try {
+              await authenticatedFetch(`/api/pages/${pageId}/move`, {
+                method: 'POST',
+                body: JSON.stringify({ targetStatus: status })
+              });
+              successCount++;
+            } catch (err) {
+              console.error(`Failed to undo move for page ${pageId}:`, err);
+              failCount++;
+            }
+          }
+        }
+        
+        if (failCount === 0) {
+          addToast(`Undid move for ${successCount} page${successCount !== 1 ? 's' : ''}`, 'success');
+        } else {
+          addToast(`Undid move for ${successCount} page${successCount !== 1 ? 's' : ''}, ${failCount} failed`, 'error');
+        }
+        
+        fetchPages();
+        fetchStats();
+      };
+      
+      setLastMove({ pageIds, fromStatuses: previousStatuses, toStatus: targetStatus });
+      addToast(result.message, 'success', undoAction);
+      setSelectedPages(new Set());
+      setBulkEditAction(null);
+      fetchPages();
+      fetchStats();
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [addToast, fetchPages, fetchStats, pages, currentStatus]);
+
+  const openComments = useCallback((page) => {
+    setSelectedPage(page);
+    fetchComments(page.id);
+  }, [fetchComments]);
+
+  const openJiraComments = useCallback((page, jiraData) => {
+    setSelectedPage({ ...page, jiraTicket: page.jiraTicket });
+    if (page.jiraTicket) {
+      fetchJiraComments(page.jiraTicket);
+    }
+  }, [fetchJiraComments]);
+
+  const handleStatusChange = useCallback((status) => {
+    setCurrentStatus(status);
+    setSearchTerm('');
+    setAuthorFilter('');
+    fetchPages(status);
+  }, [fetchPages]);
+
+  const togglePageSelection = useCallback((pageId) => {
+    setSelectedPages(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(pageId)) {
+        newSet.delete(pageId);
+      } else {
+        newSet.add(pageId);
+      }
+      return newSet;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    if (selectedPages.size === sortedPages.length) {
+      setSelectedPages(new Set());
+    } else {
+      setSelectedPages(new Set(sortedPages.map(p => p.id)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPages.size]);
+
+  const handleSort = (column) => {
+    if (sortColumn === column) {
+      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortColumn(column);
+      setSortDirection('desc');
+    }
+  };
+
+  // Fetch current user
+  const fetchCurrentUser = useCallback(async () => {
+    if (!hasCredentials()) return;
+    try {
+      const response = await authenticatedFetch('/api/user/current');
+      const data = await response.json();
+      if (data.error) {
+        console.error('Failed to fetch current user:', data.details);
+      } else {
+        setCurrentUser(data);
+      }
+    } catch (err) {
+      console.error('Error fetching current user:', err);
+    }
+  }, []);
+
+  // Fetch my tasks - uses local assignments
+  // Use refs to access the latest values without causing re-renders
+  const assignedPageIdsRef = React.useRef(assignedPageIds);
+  const lastNotificationCheckRef = React.useRef(lastNotificationCheck);
+  
+  useEffect(() => {
+    assignedPageIdsRef.current = assignedPageIds;
+  }, [assignedPageIds]);
+  
+  useEffect(() => {
+    lastNotificationCheckRef.current = lastNotificationCheck;
+  }, [lastNotificationCheck]);
+
+  const fetchMyTasks = useCallback(async () => {
+    if (!hasCredentials()) return;
+    const currentAssignedIds = Array.from(assignedPageIdsRef.current);
+    if (currentAssignedIds.length === 0) {
+      setMyTasks([]);
+      setMyTasksByStatus({});
+      return;
+    }
+    setMyTasksLoading(true);
+    try {
+      const response = await authenticatedFetch(
+        `/api/pages/my-tasks?assignedPageIds=${encodeURIComponent(JSON.stringify(currentAssignedIds))}`
+      );
+      const data = await response.json();
+      if (data.error) {
+        setError(data.details || data.error);
+      } else {
+        setMyTasks(data.pages || []);
+        setMyTasksByStatus(data.pagesByStatus || {});
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setMyTasksLoading(false);
+    }
+  }, []); // No dependencies - reads from ref
+
+  // Fetch notifications - uses local assignments
+  const fetchNotifications = useCallback(async (showLoading = true) => {
+    if (!hasCredentials()) return;
+    // Use refs to get current values without causing re-renders
+    const currentAssignedIds = Array.from(assignedPageIdsRef.current);
+    if (currentAssignedIds.length === 0) {
+      setNotifications([]);
+      return;
+    }
+    if (showLoading) setNotificationsLoading(true);
+    try {
+      // Get current lastNotificationCheck from ref
+      const currentLastCheck = lastNotificationCheckRef.current;
+      const response = await authenticatedFetch(
+        `/api/notifications?since=${encodeURIComponent(currentLastCheck)}&assignedPageIds=${encodeURIComponent(JSON.stringify(currentAssignedIds))}`
+      );
+      const data = await response.json();
+      if (data.error) {
+        console.error('Failed to fetch notifications:', data.details);
+      } else {
+        // Merge with existing notifications, avoiding duplicates
+        setNotifications(prev => {
+          const existingIds = new Set(prev.map(n => n.id));
+          const newNotifications = data.notifications.filter(n => !existingIds.has(n.id));
+          return [...newNotifications, ...prev].sort((a, b) => 
+            new Date(b.timestamp) - new Date(a.timestamp)
+          );
+        });
+        if (data.lastCheck) {
+          setLastNotificationCheck(data.lastCheck);
+          localStorage.setItem('lastNotificationCheck', data.lastCheck);
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching notifications:', err);
+    } finally {
+      if (showLoading) setNotificationsLoading(false);
+    }
+  }, []); // No dependencies - reads from refs
+
+  // Mark notification as read
+  const markNotificationRead = useCallback((notificationId) => {
+    setReadNotificationIds(prev => {
+      const newSet = new Set(prev);
+      newSet.add(notificationId);
+      localStorage.setItem('readNotifications', JSON.stringify(Array.from(newSet)));
+      return newSet;
+    });
+  }, []);
+
+  // Mark all notifications as read
+  const markAllNotificationsRead = useCallback(() => {
+    const allIds = notifications.map(n => n.id);
+    setReadNotificationIds(prev => {
+      const newSet = new Set([...prev, ...allIds]);
+      localStorage.setItem('readNotifications', JSON.stringify(Array.from(newSet)));
+      return newSet;
+    });
+  }, [notifications]);
+
+  // Clear all notifications
+  const clearNotifications = useCallback(() => {
+    setNotifications([]);
+    setReadNotificationIds(new Set());
+    localStorage.removeItem('readNotifications');
+  }, []);
+
+  useEffect(() => {
+    fetchConfig();
+    fetchStats();
+    fetchCurrentUser();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
+
+  useEffect(() => {
+    if (config) {
+      if (currentView === 'status') {
+        fetchPages();
+      } else if (currentView === 'myTasks') {
+        fetchMyTasks();
+      }
+      // Fetch notifications (no need to wait for currentUser)
+      fetchNotifications(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config, currentView]); // Only depend on config and currentView, not callbacks
+
+  // Refresh My Tasks when assignments change (only if we're on My Tasks view)
+  useEffect(() => {
+    if (currentView === 'myTasks' && config) {
+      // Use a ref to prevent infinite loops - only refresh if assignments actually changed
+      const assignedIdsArray = Array.from(assignedPageIds).sort().join(',');
+      
+      if (assignedIdsArray !== lastAssignedIdsRef.current) {
+        lastAssignedIdsRef.current = assignedIdsArray;
+        // Use setTimeout to debounce and prevent rapid refreshes
+        const timeoutId = setTimeout(() => {
+          fetchMyTasks();
+        }, 300);
+        return () => clearTimeout(timeoutId);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assignedPageIds.size, currentView, config]); // fetchMyTasks is stable (no dependencies)
+
+  // Auto-check for notifications periodically
+  useEffect(() => {
+    if (assignedPageIds.size === 0) return;
+    
+    // Check every 2 minutes
+    const interval = setInterval(() => {
+      fetchNotifications(false);
+    }, 2 * 60 * 1000);
+    
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assignedPageIds.size]); // Only depend on size, fetchNotifications is stable
+
+  // Auto-refresh functionality
+  useEffect(() => {
+    // Clear any existing interval
+    if (autoRefreshInterval) {
+      clearInterval(autoRefreshInterval);
+      setAutoRefreshInterval(null);
+    }
+    
+    if (autoRefresh > 0) {
+      const interval = setInterval(() => {
+        if (currentView === 'status') {
+          fetchPages();
+        } else if (currentView === 'myTasks') {
+          fetchMyTasks();
+        }
+        fetchStats();
+        addToast('Auto-refreshed', 'info');
+      }, autoRefresh * 1000);
+      setAutoRefreshInterval(interval);
+      
+      return () => {
+        clearInterval(interval);
+        setAutoRefreshInterval(null);
+      };
+    }
+    
+    return () => {
+      if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+        setAutoRefreshInterval(null);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRefresh, currentView]); // Only depend on autoRefresh and currentView, not callbacks
+
+  // Show toast when new notifications arrive
+  useEffect(() => {
+    const unreadCount = notifications.filter(n => !readNotificationIds.has(n.id)).length;
+    if (unreadCount > 0 && notifications.length > 0) {
+      const latestNotification = notifications[0];
+      if (!readNotificationIds.has(latestNotification.id)) {
+        addToast(
+          `New comment on "${latestNotification.pageTitle}" by ${latestNotification.commentAuthor}`,
+          'info'
+        );
+      }
+    }
+  }, [notifications, readNotificationIds, addToast]);
+
+  const handleAutoRefreshChange = (seconds) => {
+    setAutoRefresh(seconds);
+    localStorage.setItem('autoRefresh', seconds.toString());
+  };
+
+  // Enhanced keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Don't trigger shortcuts when typing in inputs
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
+        return;
+      }
+
+      // Escape - close modals, clear selection
+      if (e.key === 'Escape') {
+        setSelectedPages(new Set());
+        setSelectedPage(null);
+        setConfirmAction(null);
+        setBulkEditAction(null);
+        return;
+      }
+
+      // Cmd/Ctrl + R - refresh
+      if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
+        e.preventDefault();
+        fetchPages();
+        fetchStats();
+        addToast('Refreshed', 'info');
+        return;
+      }
+
+      // Cmd/Ctrl + K - focus search
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        const searchInput = document.querySelector('.search-input');
+        if (searchInput) searchInput.focus();
+        return;
+      }
+
+      // Cmd/Ctrl + A - select all (when not in input)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+        e.preventDefault();
+        toggleSelectAll();
+        return;
+      }
+
+      // Number keys 1-5 - switch status tabs
+      if (e.key >= '1' && e.key <= '5' && !e.metaKey && !e.ctrlKey) {
+        const statusKeys = Object.keys(statuses);
+        const index = parseInt(e.key) - 1;
+        if (statusKeys[index]) {
+          handleStatusChange(statusKeys[index]);
+        }
+        return;
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [statuses, handleStatusChange, toggleSelectAll, fetchPages, fetchStats, addToast]);
+
+  // Get unique authors for filter
+  const authors = useMemo(() => {
+    const authorSet = new Set(pages.map(p => p.author).filter(Boolean));
+    return Array.from(authorSet).sort();
+  }, [pages]);
+
+  const filteredPages = pages.filter(page => {
+    const matchesSearch = page.title.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesAuthor = !authorFilter || page.author === authorFilter;
+    
+    // Time filter: check if page was created or updated within the selected time period
+    let matchesTime = true;
+    if (timeFilter) {
+      const now = new Date();
+      let maxDaysAgo;
+      
+      if (timeFilter === 'today') {
+        // Pages created or updated today (0 days ago)
+        maxDaysAgo = 0;
+      } else if (timeFilter === 'thisWeek') {
+        // Calculate days since start of week (Monday)
+        const dayOfWeek = now.getDay();
+        const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+        maxDaysAgo = daysToMonday;
+      } else if (timeFilter === 'thisMonth') {
+        // Calculate days since start of month
+        const dayOfMonth = now.getDate();
+        maxDaysAgo = dayOfMonth - 1;
+      }
+      
+      if (maxDaysAgo !== undefined) {
+        // Check if page was created or had activity within the time period
+        const createdWithinPeriod = page.createdDaysAgo !== null && page.createdDaysAgo <= maxDaysAgo;
+        const activityWithinPeriod = page.lastActivityDaysAgo !== null && page.lastActivityDaysAgo <= maxDaysAgo;
+        matchesTime = createdWithinPeriod || activityWithinPeriod;
+      }
+    }
+    
+    return matchesSearch && matchesAuthor && matchesTime;
+  });
+
+  const sortedPages = useMemo(() => {
+    return [...filteredPages].sort((a, b) => {
+      let aVal = a[sortColumn];
+      let bVal = b[sortColumn];
+      
+      // Handle null values
+      if (aVal === null || aVal === undefined) aVal = sortDirection === 'asc' ? Infinity : -Infinity;
+      if (bVal === null || bVal === undefined) bVal = sortDirection === 'asc' ? Infinity : -Infinity;
+      
+      // Handle string sorting
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        aVal = aVal.toLowerCase();
+        bVal = bVal.toLowerCase();
+        if (sortDirection === 'asc') {
+          return aVal.localeCompare(bVal);
+        }
+        return bVal.localeCompare(aVal);
+      }
+      
+      // Handle numeric sorting
+      if (sortDirection === 'asc') {
+        return aVal - bVal;
+      }
+      return bVal - aVal;
+    });
+  }, [filteredPages, sortColumn, sortDirection]);
+
+  const staleCount = pages.filter(p => p.isStale).length;
+
+  const [bulkEditAction, setBulkEditAction] = useState(null);
+  const [launchnotesImportAction, setLaunchnotesImportAction] = useState(null);
+
+  const handleBulkEdit = useCallback(() => {
+    if (selectedPages.size === 0) return;
+    
+    // Get selected page objects from sortedPages
+    const selectedPageObjects = sortedPages.filter(p => selectedPages.has(p.id));
+    setBulkEditAction({ pages: selectedPageObjects });
+  }, [selectedPages, sortedPages]);
+
+  const handleAddToLaunchNotes = useCallback((pages) => {
+    setBulkEditAction(null); // Close bulk edit modal if open
+    setLaunchnotesImportAction({ pages });
+  }, []);
+
+  const handleLaunchNotesImport = useCallback(async (results) => {
+    setActionLoading(true);
+    try {
+      const successCount = results.filter(r => r.success).length;
+      const failCount = results.filter(r => !r.success).length;
+      
+      if (failCount === 0) {
+        addToast(`Successfully created ${successCount} draft${successCount !== 1 ? 's' : ''} in LaunchNotes`, 'success');
+      } else {
+        addToast(`Created ${successCount} draft${successCount !== 1 ? 's' : ''}, ${failCount} failed`, 'error');
+      }
+      
+      setLaunchnotesImportAction(null);
+      fetchPages();
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [addToast, fetchPages]);
+
+  return (
+    <div className="app">
+      <header className="app-header">
+        <div className="header-content">
+          <div className="header-title">
+            <div className="logo">
+              <span className="logo-icon">📋</span>
+              <h1>Release Notes Manager</h1>
+            </div>
+            <p className="header-subtitle">
+              Manage Confluence release note lifecycle
+            </p>
+          </div>
+          
+          <div className="header-stats">
+            {stats && (
+              <>
+                <div className="header-stat">
+                  <span className="header-stat-value">{stats.total}</span>
+                  <span className="header-stat-label">Total Pages</span>
+                </div>
+                <div className="header-stat">
+                  <span className="header-stat-value">{stats.avgDaysInDraft}</span>
+                  <span className="header-stat-label">Avg Days in Draft</span>
+                </div>
+              </>
+            )}
+          </div>
+          
+          <div className="header-actions">
+            <div className="auto-refresh-control">
+              <select
+                className="auto-refresh-select"
+                value={autoRefresh}
+                onChange={(e) => handleAutoRefreshChange(parseInt(e.target.value, 10))}
+                title="Auto-refresh interval"
+              >
+                <option value="0">No auto-refresh</option>
+                <option value="30">30 seconds</option>
+                <option value="60">1 minute</option>
+                <option value="300">5 minutes</option>
+                <option value="600">10 minutes</option>
+              </select>
+              {autoRefresh > 0 && (
+                <span className="auto-refresh-indicator" title={`Auto-refreshing every ${autoRefresh}s`}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </span>
+              )}
+            </div>
+            {assignedPageIds.size > 0 && (
+              <NotificationBell
+                notifications={notifications}
+                readNotificationIds={readNotificationIds}
+                onClick={() => {
+                  setShowNotifications(true);
+                  fetchNotifications(true);
+                }}
+                loading={notificationsLoading}
+              />
+            )}
+            <button 
+              className="btn btn-secondary"
+              onClick={() => { 
+                if (currentView === 'status') {
+                  fetchPages();
+                } else if (currentView === 'myTasks') {
+                  fetchMyTasks();
+                }
+                fetchStats();
+                if (currentUser) {
+                  fetchNotifications(true);
+                }
+              }}
+              disabled={loading || myTasksLoading}
+              title="Refresh (⌘+R)"
+            >
+              {(loading || myTasksLoading) ? <span className="spinner"></span> : '↻'} Refresh
+            </button>
+            <button 
+              className="btn btn-secondary"
+              onClick={() => setShowTroubleshooting(true)}
+              title="Troubleshooting & Debug"
+            >
+              🔍
+            </button>
+            <button 
+              className="btn btn-secondary"
+              onClick={() => setShowSettings(true)}
+              title="Settings"
+            >
+              ⚙️
+            </button>
+            <ThemePicker />
+          </div>
+        </div>
+      </header>
+
+      {/* View Tabs */}
+      <nav className="view-tabs">
+        <button
+          className={`view-tab ${currentView === 'status' ? 'active' : ''}`}
+          onClick={() => {
+            setCurrentView('status');
+            setSearchTerm('');
+            setAuthorFilter('');
+          }}
+        >
+          <span className="tab-icon">📋</span>
+          <span className="tab-name">All Pages</span>
+        </button>
+        <button
+          className={`view-tab ${currentView === 'myTasks' ? 'active' : ''}`}
+          onClick={() => {
+            setCurrentView('myTasks');
+            setSearchTerm('');
+            setAuthorFilter('');
+            fetchMyTasks();
+          }}
+        >
+          <span className="tab-icon">✅</span>
+          <span className="tab-name">My Tasks</span>
+          {myTasks.length > 0 && (
+            <span className="tab-count">{myTasks.length}</span>
+          )}
+        </button>
+      </nav>
+
+      {/* Status tabs - only show in status view */}
+      {currentView === 'status' && (
+        <nav className="status-tabs">
+          {Object.entries(statuses).map(([key, status]) => (
+            <button
+              key={key}
+              className={`status-tab ${currentStatus === key ? 'active' : ''}`}
+              onClick={() => handleStatusChange(key)}
+              style={{ '--tab-color': status.color }}
+            >
+              <span className="tab-icon">{status.icon}</span>
+              <span className="tab-name">{status.name}</span>
+              {stats?.byStatus?.[key] !== undefined && (
+                <span className="tab-count">{stats.byStatus[key]}</span>
+              )}
+              {stats?.staleByStatus?.[key] > 0 && (
+                <span className="tab-stale" title="Stale pages">⚠️ {stats.staleByStatus[key]}</span>
+              )}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      <main className="app-main">
+        {currentView === 'myTasks' ? (
+          <MyTasksView
+            tasksByStatus={myTasksByStatus}
+            statuses={statuses}
+            onPageClick={setDetailPage}
+            onMove={(page, target) => setConfirmAction({ page, target })}
+            onViewComments={openComments}
+            loading={myTasksLoading}
+            isPageAssignedToMe={isPageAssignedToMe}
+            assignPageToMe={assignPageToMe}
+            unassignPageFromMe={unassignPageFromMe}
+          />
+        ) : (
+          <>
+            <div className="controls-bar">
+              <div className="search-box">
+                <span className="search-icon">🔍</span>
+                <input
+                  type="text"
+                  className="search-input"
+                  placeholder="Search pages... (⌘+K)"
+                  value={searchTerm}
+                  onChange={e => setSearchTerm(e.target.value)}
+                />
+              </div>
+              
+              {authors.length > 1 && (
+                <select 
+                  className="author-filter"
+                  value={authorFilter}
+                  onChange={e => setAuthorFilter(e.target.value)}
+                >
+                  <option value="">All authors</option>
+                  {authors.map(author => (
+                    <option key={author} value={author}>{author}</option>
+                  ))}
+                </select>
+              )}
+              
+              <select 
+                className="time-filter"
+                value={timeFilter}
+                onChange={e => setTimeFilter(e.target.value)}
+                title="Filter by time period"
+              >
+                <option value="">All time</option>
+                <option value="today">Today</option>
+                <option value="thisWeek">This Week</option>
+                <option value="thisMonth">This Month</option>
+              </select>
+              
+              <div className="controls-info">
+                <span className="page-count">{sortedPages.length} pages</span>
+                {staleCount > 0 && currentStatusConfig?.staleThreshold && (
+                  <span className="stale-count">
+                    ⚠️ {staleCount} stale ({'>'}= {currentStatusConfig.staleThreshold} days)
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <BulkActionsBar 
+              selectedCount={selectedPages.size}
+              onEdit={handleBulkEdit}
+              onClearSelection={() => setSelectedPages(new Set())}
+            />
+
+            {error && (
+              <div className="error-banner">
+                <span>⚠️ {error}</span>
+                <button onClick={() => setError(null)}>Dismiss</button>
+              </div>
+            )}
+
+            {loading && pages.length === 0 ? (
+              <div className="loading-state full">
+                <div className="spinner large"></div>
+                <span>Loading pages from Confluence...</span>
+              </div>
+            ) : sortedPages.length === 0 ? (
+              <div className="empty-state full">
+                <span className="empty-icon">{currentStatusConfig?.icon || '📭'}</span>
+                <h3>No pages in {currentStatusConfig?.name || 'this status'}</h3>
+                <p>
+                  {searchTerm || authorFilter 
+                    ? 'Try adjusting your filters' 
+                    : 'Pages moved here will appear in this list'}
+                </p>
+              </div>
+            ) : (
+              <div className="pages-table-container">
+                <table className="pages-table">
+                  <thead>
+                    <tr>
+                      <th className="col-checkbox">
+                        <input 
+                          type="checkbox"
+                          checked={selectedPages.size === sortedPages.length && sortedPages.length > 0}
+                          onChange={toggleSelectAll}
+                          title="Select all"
+                        />
+                      </th>
+                      <th 
+                        className={`col-title sortable ${sortColumn === 'title' ? 'sorted' : ''}`}
+                        onClick={() => handleSort('title')}
+                      >
+                        Page Title
+                        <span className="sort-indicator">
+                          {sortColumn === 'title' ? (sortDirection === 'asc' ? '↑' : '↓') : '⇅'}
+                        </span>
+                      </th>
+                      <th 
+                        className={`col-created sortable ${sortColumn === 'createdDaysAgo' ? 'sorted' : ''}`}
+                        onClick={() => handleSort('createdDaysAgo')}
+                      >
+                        Created
+                        <span className="sort-indicator">
+                          {sortColumn === 'createdDaysAgo' ? (sortDirection === 'asc' ? '↑' : '↓') : '⇅'}
+                        </span>
+                      </th>
+                      <th 
+                        className={`col-activity sortable ${sortColumn === 'lastActivityDaysAgo' ? 'sorted' : ''}`}
+                        onClick={() => handleSort('lastActivityDaysAgo')}
+                      >
+                        Last Activity
+                        <span className="sort-indicator">
+                          {sortColumn === 'lastActivityDaysAgo' ? (sortDirection === 'asc' ? '↑' : '↓') : '⇅'}
+                        </span>
+                      </th>
+                      <th 
+                        className={`col-comments sortable ${sortColumn === 'commentCount' ? 'sorted' : ''}`}
+                        onClick={() => handleSort('commentCount')}
+                      >
+                        Comments
+                        <span className="sort-indicator">
+                          {sortColumn === 'commentCount' ? (sortDirection === 'asc' ? '↑' : '↓') : '⇅'}
+                        </span>
+                      </th>
+                      <th className="col-jira">Jira Ticket</th>
+                      <th className="col-assignee">Assignee</th>
+                      <th className="col-actions">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedPages.map(page => (
+                      <tr 
+                        key={page.id} 
+                        className={`${page.isStale ? 'stale-row' : ''} ${selectedPages.has(page.id) ? 'selected-row' : ''}`}
+                      >
+                        <td className="col-checkbox">
+                          <input 
+                            type="checkbox"
+                            checked={selectedPages.has(page.id)}
+                            onChange={() => togglePageSelection(page.id)}
+                          />
+                        </td>
+                    <td className="col-title">
+                      <div className="page-title-row">
+                        <button 
+                          className="page-link-btn"
+                          onClick={() => setDetailPage(page)}
+                          title="View details"
+                        >
+                          {page.title}
+                        </button>
+                        {isPageAssignedToMe(page.id) && (
+                          <span className="assigned-badge" title="Assigned to you">
+                            ✅
+                          </span>
+                        )}
+                      </div>
+                      <span className="page-author">by {page.author}</span>
+                    </td>
+                        <td className="col-created">
+                          <StatusBadge days={page.createdDaysAgo} threshold={60} />
+                        </td>
+                        <td className="col-activity">
+                          <StatusBadge 
+                            days={page.lastActivityDaysAgo} 
+                            threshold={currentStatusConfig?.staleThreshold} 
+                          />
+                          {page.isStale && (
+                            <span className="stale-indicator" title={`No activity for ${currentStatusConfig?.staleThreshold}+ days`}>
+                              ⚠️
+                            </span>
+                          )}
+                        </td>
+                        <td className="col-comments">
+                          <button 
+                            className="comment-btn"
+                            onClick={() => openComments(page)}
+                          >
+                            💬 {page.commentCount || 0}
+                          </button>
+                        </td>
+                        <td className="col-jira">
+                          {page.jiraTicket ? (
+                            <a 
+                              href={page.jiraUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="jira-link"
+                              onClick={e => e.stopPropagation()}
+                            >
+                              🎫 {page.jiraTicket}
+                            </a>
+                          ) : (
+                            <span className="no-jira">—</span>
+                          )}
+                        </td>
+                        <td className="col-assignee">
+                          {page.jiraAssignee ? (
+                            <div className="assignee-cell">
+                              {page.jiraAssignee.avatarUrl && (
+                                <img 
+                                  src={page.jiraAssignee.avatarUrl} 
+                                  alt="" 
+                                  className="assignee-avatar"
+                                  title={page.jiraAssignee.displayName}
+                                />
+                              )}
+                              <span className="assignee-name" title={page.jiraAssignee.displayName}>
+                                {page.jiraAssignee.displayName}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="no-assignee">—</span>
+                          )}
+                        </td>
+                        <td className="col-actions">
+                          <OverflowMenu 
+                            page={page}
+                            statuses={statuses}
+                            currentStatus={currentStatus}
+                            onMove={(page, target) => setConfirmAction({ page, target })}
+                            onViewComments={openComments}
+                            isAssigned={isPageAssignedToMe(page.id)}
+                            onAssign={assignPageToMe}
+                            onUnassign={unassignPageFromMe}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </main>
+
+      {detailPage && (
+        <PageDetailPanel
+          page={detailPage}
+          onClose={() => setDetailPage(null)}
+          statuses={statuses}
+          currentStatus={currentStatus}
+          onMove={(page, target) => {
+            setDetailPage(null);
+            setConfirmAction({ page, target });
+          }}
+          onViewComments={(page) => {
+            setDetailPage(null);
+            openComments(page);
+          }}
+          onAddComment={(page) => {
+            setConfirmAction({ page, target: currentStatus, addComment: true });
+          }}
+          onAddToLaunchNotes={handleAddToLaunchNotes}
+          onViewJiraComments={openJiraComments}
+          isAssigned={detailPage ? isPageAssignedToMe(detailPage.id) : false}
+          onAssign={assignPageToMe}
+          onUnassign={unassignPageFromMe}
+        />
+      )}
+
+      {selectedPage && (
+        <CommentModal
+          page={selectedPage}
+          comments={comments}
+          loading={commentsLoading}
+          onClose={() => setSelectedPage(null)}
+          onAddComment={commentType === 'jira' ? handleAddJiraCommentFromModal : handleAddComment}
+          type={commentType}
+        />
+      )}
+
+      {confirmAction && (
+        confirmAction.addComment ? (
+          <JiraCommentModal
+            page={confirmAction.page}
+            jiraData={null} // Will be loaded in the modal
+            onConfirm={(jiraComment, labels) => handleAddJiraComment(confirmAction.page, jiraComment, labels)}
+            onCancel={() => setConfirmAction(null)}
+            loading={actionLoading}
+          />
+        ) : (
+          <MoveConfirmModal
+            page={confirmAction.page}
+            targetStatus={confirmAction.target}
+            statuses={statuses}
+            onConfirm={(jiraComment, labels) => handleMove(confirmAction.page, confirmAction.target, jiraComment, labels)}
+            onCancel={() => setConfirmAction(null)}
+            loading={actionLoading}
+            addComment={false}
+          />
+        )
+      )}
+
+      {bulkEditAction && (
+        <BulkEditModal
+          pages={bulkEditAction.pages}
+          currentStatus={currentStatus}
+          statuses={statuses}
+          onConfirm={(targetStatus, jiraComment, confluenceComment, labels) => executeBulkEdit(
+            targetStatus,
+            bulkEditAction.pages.map(p => p.id),
+            jiraComment,
+            confluenceComment,
+            labels
+          )}
+          onAddToLaunchNotes={handleAddToLaunchNotes}
+          onCancel={() => setBulkEditAction(null)}
+          loading={actionLoading}
+          onAssignToMe={assignPageToMe}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsModal
+          onSave={handleSaveSettings}
+          onCancel={() => {
+            if (hasCredentials()) {
+              setShowSettings(false);
+            } else {
+              addToast('Please configure settings to continue', 'info');
+            }
+          }}
+          initialSettings={getCredentials()}
+        />
+      )}
+
+      {showTroubleshooting && (
+        <TroubleshootingPanel onClose={() => setShowTroubleshooting(false)} />
+      )}
+
+      {showNotifications && (
+        <NotificationPanel
+          notifications={notifications}
+          readNotificationIds={readNotificationIds}
+          onClose={() => setShowNotifications(false)}
+          onNotificationClick={(notification) => {
+            // Find the page and open it
+            const page = myTasks.find(p => p.id === notification.pageId) ||
+                        pages.find(p => p.id === notification.pageId);
+            if (page) {
+              setDetailPage(page);
+              openComments(page);
+            } else {
+              // If page not loaded, open the URL
+              window.open(notification.pageUrl, '_blank');
+            }
+          }}
+          onMarkRead={markNotificationRead}
+          onMarkAllRead={markAllNotificationsRead}
+          onClearAll={clearNotifications}
+          statuses={statuses}
+        />
+      )}
+
+      {launchnotesImportAction && (
+        <LaunchNotesImportModal
+          pages={launchnotesImportAction.pages}
+          onConfirm={handleLaunchNotesImport}
+          onCancel={() => setLaunchnotesImportAction(null)}
+          loading={actionLoading}
+        />
+      )}
+
+      <div className="toast-container">
+        {toasts.map(toast => (
+          <Toast
+            key={toast.id}
+            message={toast.message}
+            type={toast.type}
+            onClose={() => removeToast(toast.id)}
+            onUndo={toast.undoAction ? () => { toast.undoAction(); removeToast(toast.id); } : null}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export default App;

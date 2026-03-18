@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Confluence Release Manager Launcher
+# Usage: ./crm or add to PATH and run: crm
+
+PROJECT_DIR="/Users/mickey.farmer/Documents/confluence-release-manager"
+cd "$PROJECT_DIR"
+
+# Check if server is already running
+if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
+    echo "✅ Server already running on port 3001"
+    open http://localhost:3001
+    exit 0
+fi
+
+# Check if .env exists
+if [ ! -f .env ]; then
+    echo "⚠️  Warning: .env file not found!"
+    echo "   Please create a .env file with your Confluence credentials."
+    echo ""
+    read -p "Continue anyway? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+# Check if node_modules exists
+if [ ! -d "node_modules" ] || [ ! -d "client/node_modules" ]; then
+    echo "📦 Installing dependencies..."
+    npm run install:all
+fi
+
+# Start the server
+echo "🚀 Starting Confluence Release Manager server..."
+npm start > /tmp/confluence-server.log 2>&1 &
+SERVER_PID=$!
+
+# Wait for server to start
+echo "⏳ Waiting for server to start..."
+for i in {1..10}; do
+    sleep 1
+    if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
+        echo "✅ Server started successfully!"
+        echo $SERVER_PID > /tmp/confluence-server.pid
+        echo ""
+        echo "📋 Server running (PID: $SERVER_PID)"
+        echo "🌐 Opening browser..."
+        echo ""
+        echo "To stop the server: kill \$(cat /tmp/confluence-server.pid)"
+        echo "Or: pkill -f 'node.*server/index.js'"
+        echo ""
+        open http://localhost:3001
+        exit 0
+    fi
+done
+
+# If we get here, server didn't start
+echo "❌ Server failed to start. Check logs:"
+echo "   tail -f /tmp/confluence-server.log"
+kill $SERVER_PID 2>/dev/null
+exit 1

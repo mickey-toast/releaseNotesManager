@@ -1,0 +1,282 @@
+import React, { useState, useEffect } from 'react';
+
+// Available Jira fields that can be displayed
+const AVAILABLE_FIELDS = [
+  { id: 'assignee', label: 'Assignee', default: true },
+  { id: 'reporter', label: 'Reporter', default: true },
+  { id: 'labels', label: 'Labels', default: true },
+  { id: 'priority', label: 'Priority', default: false },
+  { id: 'status', label: 'Status', default: false },
+  { id: 'roadmapStatus', label: 'Roadmap Status', default: true },
+  { id: 'dueDate', label: 'Due Date', default: false },
+  { id: 'fixVersions', label: 'Fix Versions', default: false },
+  { id: 'components', label: 'Components', default: false },
+  { id: 'issueType', label: 'Issue Type', default: false },
+  { id: 'epicKey', label: 'Epic Key', default: false }
+];
+
+const SettingsModal = ({ onSave, onCancel, initialSettings }) => {
+  // Get field preferences from localStorage or use defaults
+  const getDefaultFieldPreferences = () => {
+    const saved = localStorage.getItem('jiraFieldPreferences');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // Fall through to defaults
+      }
+    }
+    // Return default preferences
+    const defaults = {};
+    AVAILABLE_FIELDS.forEach(field => {
+      defaults[field.id] = field.default;
+    });
+    return defaults;
+  };
+
+  const [settings, setSettings] = useState({
+    baseUrl: initialSettings?.baseUrl || 'https://toasttab.atlassian.net/wiki',
+    email: initialSettings?.email || '',
+    apiToken: initialSettings?.apiToken || '',
+    spaceKey: initialSettings?.spaceKey || 'RD',
+    parentPageId: initialSettings?.parentPageId || '',
+    inProgressPageId: initialSettings?.inProgressPageId || '',
+    needsActionPageId: initialSettings?.needsActionPageId || '',
+    publishedPageId: initialSettings?.publishedPageId || '',
+    discardPageId: initialSettings?.discardPageId || ''
+  });
+  const [fieldPreferences, setFieldPreferences] = useState(getDefaultFieldPreferences());
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+
+  const handleChange = (field, value) => {
+    setSettings(prev => ({ ...prev, [field]: value }));
+    setTestResult(null);
+  };
+
+  const testConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const response = await fetch('/api/test-connection', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Atlassian-Email': settings.email,
+          'X-Atlassian-Token': settings.apiToken,
+          'X-Atlassian-Base-Url': settings.baseUrl
+        },
+        body: JSON.stringify({ spaceKey: settings.spaceKey })
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        setTestResult({ success: true, message: 'Connection successful!' });
+      } else {
+        setTestResult({ success: false, message: data.error || 'Connection failed' });
+      }
+    } catch (err) {
+      setTestResult({ success: false, message: err.message || 'Connection failed' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleFieldToggle = (fieldId) => {
+    setFieldPreferences(prev => ({
+      ...prev,
+      [fieldId]: !prev[fieldId]
+    }));
+  };
+
+  const handleSave = () => {
+    if (!settings.email || !settings.apiToken) {
+      setTestResult({ success: false, message: 'Email and API Token are required' });
+      return;
+    }
+    // Save field preferences to localStorage
+    localStorage.setItem('jiraFieldPreferences', JSON.stringify(fieldPreferences));
+    onSave(settings);
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>⚙️ Settings</h2>
+          <button className="close-btn" onClick={onCancel}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className="settings-content">
+            <p className="settings-intro">
+              Enter your Atlassian credentials. These will be stored locally in your browser and never shared.
+            </p>
+
+            <div className="settings-section">
+              <h3>Authentication</h3>
+              <div className="settings-field">
+                <label>Confluence Base URL</label>
+                <input
+                  type="text"
+                  value={settings.baseUrl}
+                  onChange={(e) => handleChange('baseUrl', e.target.value)}
+                  placeholder="https://toasttab.atlassian.net/wiki"
+                />
+              </div>
+              <div className="settings-field">
+                <label>Email Address</label>
+                <input
+                  type="email"
+                  value={settings.email}
+                  onChange={(e) => handleChange('email', e.target.value)}
+                  placeholder="your-email@toasttab.com"
+                  required
+                />
+              </div>
+              <div className="settings-field">
+                <label>API Token</label>
+                <input
+                  type="password"
+                  value={settings.apiToken}
+                  onChange={(e) => handleChange('apiToken', e.target.value)}
+                  placeholder="Your Atlassian API token"
+                  required
+                />
+                <small>
+                  <a 
+                    href="https://id.atlassian.com/manage-profile/security/api-tokens" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                  >
+                    Get your API token here →
+                  </a>
+                </small>
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <h3>Configuration</h3>
+              <div className="settings-field">
+                <label>Space Key</label>
+                <input
+                  type="text"
+                  value={settings.spaceKey}
+                  onChange={(e) => handleChange('spaceKey', e.target.value)}
+                  placeholder="RD"
+                />
+              </div>
+              <div className="settings-field">
+                <label>Draft Parent Page ID <span className="read-only-label">(read-only)</span></label>
+                <input
+                  type="text"
+                  value={settings.parentPageId}
+                  onChange={(e) => handleChange('parentPageId', e.target.value)}
+                  placeholder="5530845756"
+                  disabled
+                  readOnly
+                  className="read-only-input"
+                />
+              </div>
+              <div className="settings-field">
+                <label>In Progress Page ID <span className="read-only-label">(read-only)</span></label>
+                <input
+                  type="text"
+                  value={settings.inProgressPageId}
+                  onChange={(e) => handleChange('inProgressPageId', e.target.value)}
+                  placeholder="5530550421"
+                  disabled
+                  readOnly
+                  className="read-only-input"
+                />
+              </div>
+              <div className="settings-field">
+                <label>Needs Action Page ID <span className="read-only-label">(read-only)</span></label>
+                <input
+                  type="text"
+                  value={settings.needsActionPageId}
+                  onChange={(e) => handleChange('needsActionPageId', e.target.value)}
+                  placeholder="5529731171"
+                  disabled
+                  readOnly
+                  className="read-only-input"
+                />
+              </div>
+              <div className="settings-field">
+                <label>Published Page ID <span className="read-only-label">(read-only)</span></label>
+                <input
+                  type="text"
+                  value={settings.publishedPageId}
+                  onChange={(e) => handleChange('publishedPageId', e.target.value)}
+                  placeholder="5529862458"
+                  disabled
+                  readOnly
+                  className="read-only-input"
+                />
+              </div>
+              <div className="settings-field">
+                <label>Discard Page ID <span className="read-only-label">(read-only)</span></label>
+                <input
+                  type="text"
+                  value={settings.discardPageId}
+                  onChange={(e) => handleChange('discardPageId', e.target.value)}
+                  placeholder="5529600531"
+                  disabled
+                  readOnly
+                  className="read-only-input"
+                />
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <h3>Jira Field Preferences</h3>
+              <p className="settings-intro" style={{ marginBottom: '1rem' }}>
+                Choose which Jira ticket fields to display when moving pages. Custom fields (like Feature Flags) will appear automatically if they exist on the ticket.
+              </p>
+              <div className="field-preferences-grid">
+                {AVAILABLE_FIELDS.map(field => (
+                  <label key={field.id} className="field-preference-item">
+                    <input
+                      type="checkbox"
+                      checked={fieldPreferences[field.id] || false}
+                      onChange={() => handleFieldToggle(field.id)}
+                    />
+                    <span>{field.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {testResult && (
+              <div className={`test-result ${testResult.success ? 'success' : 'error'}`}>
+                {testResult.success ? '✓' : '✕'} {testResult.message}
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button 
+                className="btn btn-secondary" 
+                onClick={testConnection}
+                disabled={testing || !settings.email || !settings.apiToken}
+              >
+                {testing ? 'Testing...' : 'Test Connection'}
+              </button>
+              <div style={{ flex: 1 }} />
+              <button className="btn btn-secondary" onClick={onCancel}>
+                Cancel
+              </button>
+              <button 
+                className="btn btn-primary" 
+                onClick={handleSave}
+                disabled={!settings.email || !settings.apiToken}
+              >
+                Save Settings
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default SettingsModal;
