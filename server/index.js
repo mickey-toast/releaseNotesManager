@@ -2,6 +2,7 @@ const path = require('path');
 require('dotenv').config();
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
+const compression = require('compression');
 const cors = require('cors');
 const axios = require('axios');
 const fs = require('fs');
@@ -22,6 +23,7 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
+app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: '2mb' }));
 app.use('/api', requireSupabaseAuth);
 app.use('/api', userProfileRoutes);
@@ -541,83 +543,100 @@ app.get('/api/config', (req, res) => {
   }
 });
 
+/**
+ * Load lightweight page lists for every status (Confluence: expand version,history only).
+ * Used for dashboard stats and optional full JSON for /api/pages/all.
+ */
+async function computeDashboardAllPagesAndStats(req) {
+  const credentials = getCredentialsFromRequest(req);
+  const { confluenceApi } = createApiClients(credentials);
+
+  const allPages = {};
+  const stats = {
+    total: 0,
+    byStatus: {},
+    staleByStatus: {},
+    avgDaysInDraft: 0
+  };
+
+  const PAGE_LIMIT = 100;
+
+  for (const [statusKey, status] of Object.entries(PAGE_STATUSES)) {
+    try {
+      const allResults = [];
+      let start = 0;
+      let hasMore = true;
+
+      while (hasMore) {
+        const response = await confluenceApi.get(`/rest/api/content/${status.pageId}/child/page`, {
+          params: {
+            expand: 'version,history',
+            limit: PAGE_LIMIT,
+            start
+          }
+        });
+
+        const results = response.data.results || [];
+        allResults.push(...results);
+        hasMore = results.length === PAGE_LIMIT;
+        start += results.length;
+      }
+
+      const pages = allResults.map(page => ({
+        id: page.id,
+        title: page.title,
+        status: statusKey,
+        createdDaysAgo: daysAgo(page.history?.createdDate),
+        lastModifiedDaysAgo: daysAgo(page.version?.when),
+        author: page.history?.createdBy?.displayName
+      }));
+
+      allPages[statusKey] = pages;
+      stats.byStatus[statusKey] = pages.length;
+      stats.total += pages.length;
+
+      if (status.staleThreshold) {
+        stats.staleByStatus[statusKey] = pages.filter(
+          p => p.lastModifiedDaysAgo >= status.staleThreshold
+        ).length;
+      }
+    } catch (e) {
+      const errorMsg = e.message || e.response?.statusText || String(e);
+      const isAuthError = e.response?.status === 401 ||
+        errorMsg.includes('401') ||
+        errorMsg.includes('Missing Atlassian credentials') ||
+        errorMsg.includes('Unauthorized');
+      if (!isAuthError) {
+        console.log(`Could not fetch pages for status ${statusKey}:`, errorMsg);
+      }
+      allPages[statusKey] = [];
+      stats.byStatus[statusKey] = 0;
+    }
+  }
+
+  if (allPages.draft && allPages.draft.length > 0) {
+    const totalDays = allPages.draft.reduce((sum, p) => sum + (p.createdDaysAgo || 0), 0);
+    stats.avgDaysInDraft = Math.round(totalDays / allPages.draft.length);
+  }
+
+  return { allPages, stats };
+}
+
+// Small JSON for header stats — same Confluence work as /all, less bandwidth than full page trees
+app.get('/api/pages/stats', async (req, res) => {
+  try {
+    const { stats } = await computeDashboardAllPagesAndStats(req);
+    res.json({ stats });
+  } catch (error) {
+    console.error('Error fetching page stats:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+});
+
 // Get all pages across all statuses (for dashboard)
 app.get('/api/pages/all', async (req, res) => {
   try {
-    const credentials = getCredentialsFromRequest(req);
-    const { confluenceApi } = createApiClients(credentials);
-    
-    const allPages = {};
-    const stats = {
-      total: 0,
-      byStatus: {},
-      staleByStatus: {},
-      avgDaysInDraft: 0
-    };
-
-    const PAGE_LIMIT = 100;
-
-    for (const [statusKey, status] of Object.entries(PAGE_STATUSES)) {
-      try {
-        const allResults = [];
-        let start = 0;
-        let hasMore = true;
-
-        while (hasMore) {
-          const response = await confluenceApi.get(`/rest/api/content/${status.pageId}/child/page`, {
-            params: {
-              expand: 'version,history',
-              limit: PAGE_LIMIT,
-              start
-            }
-          });
-
-          const results = response.data.results || [];
-          allResults.push(...results);
-          hasMore = results.length === PAGE_LIMIT;
-          start += results.length;
-        }
-
-        const pages = allResults.map(page => ({
-          id: page.id,
-          title: page.title,
-          status: statusKey,
-          createdDaysAgo: daysAgo(page.history?.createdDate),
-          lastModifiedDaysAgo: daysAgo(page.version?.when),
-          author: page.history?.createdBy?.displayName
-        }));
-
-        allPages[statusKey] = pages;
-        stats.byStatus[statusKey] = pages.length;
-        stats.total += pages.length;
-
-        // Count stale pages
-        if (status.staleThreshold) {
-          stats.staleByStatus[statusKey] = pages.filter(
-            p => p.lastModifiedDaysAgo >= status.staleThreshold
-          ).length;
-        }
-      } catch (e) {
-        // Only log if it's not a credentials error (401) - those are expected when credentials aren't set
-        const errorMsg = e.message || e.response?.statusText || String(e);
-        const isAuthError = e.response?.status === 401 || 
-                           errorMsg.includes('401') || 
-                           errorMsg.includes('Missing Atlassian credentials') ||
-                           errorMsg.includes('Unauthorized');
-        if (!isAuthError) {
-          console.log(`Could not fetch pages for status ${statusKey}:`, errorMsg);
-        }
-        allPages[statusKey] = [];
-        stats.byStatus[statusKey] = 0;
-      }
-    }
-
-    // Calculate avg days in draft
-    if (allPages.draft && allPages.draft.length > 0) {
-      const totalDays = allPages.draft.reduce((sum, p) => sum + (p.createdDaysAgo || 0), 0);
-      stats.avgDaysInDraft = Math.round(totalDays / allPages.draft.length);
-    }
-
+    const { allPages, stats } = await computeDashboardAllPagesAndStats(req);
     res.json({ pages: allPages, stats });
   } catch (error) {
     console.error('Error fetching all pages:', error.response?.data || error.message);

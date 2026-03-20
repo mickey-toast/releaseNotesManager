@@ -295,7 +295,8 @@ Key points:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/pages` | GET | List pages for a specific status |
-| `/api/pages/all` | GET | List all pages across all statuses (for dashboard stats) |
+| `/api/pages/stats` | GET | Dashboard totals only (same Confluence fetches as `/all`, small JSON) |
+| `/api/pages/all` | GET | List all pages across all statuses (full payload; prefer `/stats` for header) |
 | `/api/pages/my-tasks` | GET | List pages assigned to current user |
 | `/api/pages/:pageId` | GET | Get single page details |
 | `/api/pages/:pageId/content` | GET | Get page content for LaunchNotes import |

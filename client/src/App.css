@@ -5,7 +5,213 @@
   flex-direction: column;
 }
 
-/* Header */
+.app-shell {
+  flex-direction: row;
+  align-items: stretch;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+.app-sidebar {
+  width: 272px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  min-height: 100vh;
+  max-height: 100vh;
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 14px 16px;
+  gap: 0;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-subtle);
+  overflow-y: auto;
+  z-index: 120;
+}
+
+.sidebar-brand {
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.sidebar-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  background: linear-gradient(135deg, var(--text-primary), var(--accent-primary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.sidebar-tagline {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.sidebar-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.sidebar-stat {
+  padding: 10px 8px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  text-align: center;
+}
+
+.sidebar-stat-value {
+  display: block;
+  font-size: 20px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent-primary);
+  line-height: 1.2;
+}
+
+.sidebar-stat-label {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+}
+
+.sidebar-section-label {
+  margin: 14px 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.sidebar-nav-views {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-nav-views .sidebar-nav-item.view-tab {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+.sidebar-auto-refresh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.sidebar-select.auto-refresh-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-nav-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sidebar-action-btn {
+  width: 100%;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  justify-content: center;
+}
+
+.app-sidebar .theme-dropdown {
+  left: 0;
+  right: auto;
+}
+
+.app-main-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-main-topbar {
+  display: none;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.sidebar-mobile-toggle {
+  font-size: 14px;
+}
+
+@media (max-width: 899px) {
+  .app-main-topbar {
+    display: flex;
+  }
+
+  .app-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    max-height: 100vh;
+    height: 100vh;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .app-sidebar.is-open {
+    transform: translateX(0);
+  }
+
+  .app-shell.sidebar-drawer-open .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 119;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: rgba(0, 0, 0, 0.42);
+    cursor: pointer;
+  }
+}
+
+@media (min-width: 900px) {
+  .sidebar-mobile-toggle {
+    display: none !important;
+  }
+}
+
+/* Header (legacy / modals only) */
 .app-header {
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-subtle);
@@ -166,6 +372,12 @@
 [data-theme="light"] .app-header {
   background: var(--bg-secondary);
   border-bottom-color: var(--border-light);
+}
+
+[data-theme="light"] .app-sidebar,
+[data-theme="light"] .app-main-topbar {
+  background: var(--bg-secondary);
+  border-color: var(--border-light);
 }
 
 [data-theme="light"] .pages-table-container,

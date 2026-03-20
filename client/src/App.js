@@ -3457,6 +3457,21 @@ function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 900px)');
+    const sync = () => setSidebarOpen(mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, []);
+
+  const collapseSidebarOnNavigate = useCallback(() => {
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 899px)').matches) {
+      setSidebarOpen(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!perms.loaded || perms.ai) return;
     setCurrentView((v) => (v === 'aiHub' ? 'status' : v));
@@ -3554,9 +3569,9 @@ function App() {
   const fetchStats = useCallback(async () => {
     if (!hasCredentials()) return;
     try {
-      const response = await authenticatedFetch('/api/pages/all');
+      const response = await authenticatedFetch('/api/pages/stats');
       const data = await response.json();
-        setStats(data.stats);
+      setStats(data.stats);
     } catch (err) {
       console.error('Failed to fetch stats:', err);
     }
@@ -4238,9 +4253,7 @@ function App() {
       if (!hasCredentials()) {
         setShowSettings(true);
       }
-      fetchConfig();
-      fetchStats();
-      fetchCurrentUser();
+      await Promise.all([fetchConfig(), fetchStats(), fetchCurrentUser()]);
     })();
     return () => {
       cancelled = true;
@@ -4295,7 +4308,8 @@ function App() {
         } else if (currentView === 'myTasks') {
           fetchMyTasks();
         }
-        fetchStats();
+        // Skip fetchStats here: it scans every Confluence status (same cost as a full dashboard pull).
+        // Header stats update on load, manual refresh, and after moves. Reduces load on slow hosts (e.g. Render free).
         addToast('Auto-refreshed', 'info');
       }, autoRefresh * 1000);
       setAutoRefreshInterval(interval);
@@ -4341,7 +4355,13 @@ function App() {
       // Cmd/Ctrl + R - refresh
       if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
         e.preventDefault();
-        fetchPages();
+        if (currentView === 'status') {
+          fetchPages();
+        } else if (currentView === 'myTasks') {
+          fetchMyTasks();
+        } else if (currentView === 'aiHub') {
+          fetchAllPagesForAI();
+        }
         fetchStats();
         addToast('Refreshed', 'info');
         return;
@@ -4375,7 +4395,17 @@ function App() {
     
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [statuses, handleStatusChange, toggleSelectAll, fetchPages, fetchStats, addToast]);
+  }, [
+    statuses,
+    handleStatusChange,
+    toggleSelectAll,
+    fetchPages,
+    fetchStats,
+    fetchMyTasks,
+    fetchAllPagesForAI,
+    currentView,
+    addToast
+  ]);
 
   // Get unique authors for filter
   const authors = useMemo(() => {
@@ -5139,165 +5169,209 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app app-shell${sidebarOpen ? ' sidebar-drawer-open' : ''}`}>
       {showRocketCelebration && (
         <ConfettiCelebration onComplete={() => setShowRocketCelebration(false)} />
       )}
-      <header className="app-header">
-        <div className="header-content">
-          <div className="header-title">
-            <div className="logo">
-              <h1>Release Notes Manager</h1>
-            </div>
-            <p className="header-subtitle">
-              Manage Confluence release note lifecycle
-            </p>
+      <button
+        type="button"
+        className="sidebar-backdrop"
+        aria-label="Close menu"
+        onClick={() => setSidebarOpen(false)}
+      />
+      <aside id="app-sidebar-nav" className={`app-sidebar${sidebarOpen ? ' is-open' : ''}`} aria-label="Main navigation">
+        <div className="sidebar-brand">
+          <div className="sidebar-logo">
+            <h1 className="sidebar-title">Release Notes</h1>
           </div>
-          
-          <div className="header-stats">
-            {stats && (
-              <>
-                <div className="header-stat">
-                  <span className="header-stat-value">{stats.total}</span>
-                  <span className="header-stat-label">Total Pages</span>
-                </div>
-                <div className="header-stat">
-                  <span className="header-stat-value">{stats.avgDaysInDraft}</span>
-                  <span className="header-stat-label">Avg Days in Draft</span>
-                </div>
-              </>
-            )}
-          </div>
-          
-          <div className="header-actions">
-            <div className="auto-refresh-control">
-              <select
-                className="auto-refresh-select"
-                value={autoRefresh}
-                onChange={(e) => handleAutoRefreshChange(parseInt(e.target.value, 10))}
-                title="Auto-refresh interval"
-              >
-                <option value="0">No auto-refresh</option>
-                <option value="30">30 seconds</option>
-                <option value="60">1 minute</option>
-                <option value="300">5 minutes</option>
-                <option value="600">10 minutes</option>
-              </select>
-              {autoRefresh > 0 && (
-                <span className="auto-refresh-indicator" title={`Auto-refreshing every ${autoRefresh}s`}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </span>
-              )}
-            </div>
-            <button 
-              className="btn btn-secondary"
-              onClick={() => { 
-                if (currentView === 'status') {
-                  fetchPages();
-                } else if (currentView === 'myTasks') {
-                  fetchMyTasks();
-                }
-                fetchStats();
-              }}
-              disabled={loading || myTasksLoading}
-              title="Refresh (⌘+R)"
-            >
-              {(loading || myTasksLoading) ? <span className="spinner"></span> : ''} Refresh
-            </button>
-            <button 
-              className="btn btn-secondary"
-              onClick={() => setShowActivityLog(true)}
-              title="View and export your activity in the tool"
-            >
-              Activity Log
-            </button>
-            <button 
-              className="btn btn-secondary"
-              onClick={() => setShowTroubleshooting(true)}
-              title="Troubleshooting & Debug"
-            >
-              Troubleshooting
-            </button>
-            <button 
-              className="btn btn-secondary"
-              onClick={() => setShowSettings(true)}
-              title="Settings"
-            >
-              Settings
-            </button>
-            {perms.loaded && perms.isAdmin && (
-              <a
-                href="#/admin"
-                className="btn btn-secondary"
-                onClick={(e) => {
-                  e.preventDefault();
-                  window.location.hash = '#/admin';
-                }}
-                title="User invites and permissions"
-              >
-                Admin
-              </a>
-            )}
-            {isSupabaseAuthConfigured() && (
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => signOutApp()}
-                title="Sign out of this app (Toast login)"
-              >
-                Sign out
-              </button>
-            )}
-            <ThemePicker />
-          </div>
+          <p className="sidebar-tagline">Confluence release lifecycle</p>
         </div>
-      </header>
 
-      {/* View Tabs */}
-      <nav className="view-tabs">
-        <button
-          className={`view-tab ${currentView === 'status' ? 'active' : ''}`}
-          onClick={() => {
-            setCurrentView('status');
-            setSearchTerm('');
-            setAuthorFilter('');
-            setFixVersionFilter('');
-          }}
-        >
-          <span className="tab-name">All Pages</span>
-        </button>
-        <button
-          className={`view-tab ${currentView === 'myTasks' ? 'active' : ''}`}
-          onClick={() => {
-            setCurrentView('myTasks');
-            setSearchTerm('');
-            setAuthorFilter('');
-            setFixVersionFilter('');
-            fetchMyTasks();
-          }}
-        >
-          <span className="tab-name">My Tasks</span>
-          {myTasks.length > 0 && (
-            <span className="tab-count">{myTasks.length}</span>
-          )}
-        </button>
-        {(!perms.loaded || perms.ai) && (
+        {stats && (
+          <div className="sidebar-stats">
+            <div className="sidebar-stat">
+              <span className="sidebar-stat-value">{stats.total}</span>
+              <span className="sidebar-stat-label">Total pages</span>
+            </div>
+            <div className="sidebar-stat">
+              <span className="sidebar-stat-value">{stats.avgDaysInDraft}</span>
+              <span className="sidebar-stat-label">Avg days in draft</span>
+            </div>
+          </div>
+        )}
+
+        <nav className="sidebar-nav-views" aria-label="Views">
           <button
-            className={`view-tab ${currentView === 'aiHub' ? 'active' : ''}`}
+            type="button"
+            className={`sidebar-nav-item view-tab ${currentView === 'status' ? 'active' : ''}`}
             onClick={() => {
-              setCurrentView('aiHub');
+              setCurrentView('status');
               setSearchTerm('');
               setAuthorFilter('');
               setFixVersionFilter('');
+              collapseSidebarOnNavigate();
             }}
           >
-            <span className="tab-name">AI Hub</span>
+            <span className="tab-name">All Pages</span>
           </button>
-        )}
-      </nav>
+          <button
+            type="button"
+            className={`sidebar-nav-item view-tab ${currentView === 'myTasks' ? 'active' : ''}`}
+            onClick={() => {
+              setCurrentView('myTasks');
+              setSearchTerm('');
+              setAuthorFilter('');
+              setFixVersionFilter('');
+              fetchMyTasks();
+              collapseSidebarOnNavigate();
+            }}
+          >
+            <span className="tab-name">My Tasks</span>
+            {myTasks.length > 0 && <span className="tab-count">{myTasks.length}</span>}
+          </button>
+          {(!perms.loaded || perms.ai) && (
+            <button
+              type="button"
+              className={`sidebar-nav-item view-tab ${currentView === 'aiHub' ? 'active' : ''}`}
+              onClick={() => {
+                setCurrentView('aiHub');
+                setSearchTerm('');
+                setAuthorFilter('');
+                setFixVersionFilter('');
+                collapseSidebarOnNavigate();
+              }}
+            >
+              <span className="tab-name">AI Hub</span>
+            </button>
+          )}
+        </nav>
 
+        <div className="sidebar-section-label">Auto-refresh</div>
+        <div className="sidebar-auto-refresh">
+          <select
+            className="auto-refresh-select sidebar-select"
+            value={autoRefresh}
+            onChange={(e) => handleAutoRefreshChange(parseInt(e.target.value, 10))}
+            title="Auto-refresh interval"
+          >
+            <option value="0">Off</option>
+            <option value="30">30 seconds</option>
+            <option value="60">1 minute</option>
+            <option value="300">5 minutes</option>
+            <option value="600">10 minutes</option>
+          </select>
+          {autoRefresh > 0 && (
+            <span className="auto-refresh-indicator" title={`Refreshing data every ${autoRefresh}s (header totals refresh on manual reload)`}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </span>
+          )}
+        </div>
+
+        <div className="sidebar-section-label">Actions</div>
+        <nav className="sidebar-nav-actions" aria-label="Tools">
+          <button
+            type="button"
+            className="btn btn-secondary sidebar-action-btn"
+            onClick={() => {
+              if (currentView === 'status') {
+                fetchPages();
+              } else if (currentView === 'myTasks') {
+                fetchMyTasks();
+              } else if (currentView === 'aiHub') {
+                fetchAllPagesForAI();
+              }
+              fetchStats();
+              collapseSidebarOnNavigate();
+            }}
+            disabled={loading || myTasksLoading || allPagesLoading}
+            title="Refresh (⌘+R)"
+          >
+            {(loading || myTasksLoading || allPagesLoading) ? <span className="spinner" /> : null}
+            Refresh
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary sidebar-action-btn"
+            onClick={() => {
+              setShowActivityLog(true);
+              collapseSidebarOnNavigate();
+            }}
+            title="View and export your activity in the tool"
+          >
+            Activity log
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary sidebar-action-btn"
+            onClick={() => {
+              setShowTroubleshooting(true);
+              collapseSidebarOnNavigate();
+            }}
+            title="Troubleshooting & Debug"
+          >
+            Troubleshooting
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary sidebar-action-btn"
+            onClick={() => {
+              setShowSettings(true);
+              collapseSidebarOnNavigate();
+            }}
+            title="Settings"
+          >
+            Settings
+          </button>
+          {perms.loaded && perms.isAdmin && (
+            <a
+              href="#/admin"
+              className="btn btn-secondary sidebar-action-btn"
+              onClick={(e) => {
+                e.preventDefault();
+                window.location.hash = '#/admin';
+                collapseSidebarOnNavigate();
+              }}
+              title="User invites and permissions"
+            >
+              Admin
+            </a>
+          )}
+          {isSupabaseAuthConfigured() && (
+            <button
+              type="button"
+              className="btn btn-secondary sidebar-action-btn"
+              onClick={() => {
+                signOutApp();
+                collapseSidebarOnNavigate();
+              }}
+              title="Sign out of this app (Toast login)"
+            >
+              Sign out
+            </button>
+          )}
+        </nav>
+
+        <div className="sidebar-footer">
+          <ThemePicker />
+        </div>
+      </aside>
+
+      <div className="app-main-column">
+        <div className="app-main-topbar">
+          <button
+            type="button"
+            className="btn btn-secondary sidebar-mobile-toggle"
+            onClick={() => setSidebarOpen((o) => !o)}
+            aria-expanded={sidebarOpen}
+            aria-controls="app-sidebar-nav"
+            title="Menu"
+          >
+            ☰ Menu
+          </button>
+        </div>
+        <main className="app-main">
       {/* Status tabs - only show in status view */}
       {currentView === 'status' && (
         <nav className="status-tabs">
@@ -5335,7 +5409,6 @@ function App() {
         </nav>
       )}
 
-      <main className="app-main">
         {currentView === 'aiHub' ? (
           <AIHub 
             pages={allPagesForAI}
@@ -5714,7 +5787,8 @@ function App() {
             )}
           </>
         )}
-      </main>
+        </main>
+      </div>
 
       {detailPage && (
         <PageDetailPanel

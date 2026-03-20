@@ -68,6 +68,12 @@ Apply the SQL migration **`supabase/migrations/20250320150000_user_app_profile.s
 
 User Atlassian tokens are **not** placed in Render env vars; they are stored per user in **Postgres** (synced from the app) and still mirrored in the browser for the current session. Shared server secrets are only the Supabase/JWT values above.
 
+### Performance (free tier & API load)
+
+- **Cold start:** Free Web Services sleep after idle time; the **first** request after sleep can take on the order of **30–60+ seconds** while Render starts the dyno. The app cannot remove that; upgrading the plan or occasionally pinging the service reduces “random” slowness.
+- **Warm requests:** Most remaining delay is **Confluence/Jira** round-trips. List views that enrich each row with Jira are inherently heavier than header stats.
+- **Smaller payloads:** The UI loads dashboard totals via **`GET /api/pages/stats`** (counts only). **`gzip` compression** is enabled for JSON responses. **Auto-refresh** reloads the current view but does **not** re-hit the stats endpoint every tick (to avoid duplicating the full multi-status Confluence scan). Use **Refresh** or **⌘/Ctrl+R** to update header totals after big changes.
+
 ## 5. Health checks
 
 - **Health check path:** `/`  
