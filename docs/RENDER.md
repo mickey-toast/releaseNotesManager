@@ -55,6 +55,7 @@ Set these on the **same** Render Web Service (add under **Environment**). CRA re
 | Variable | Where | Purpose |
 |----------|--------|---------|
 | `SUPABASE_JWT_SECRET` | Server only | If set, every `/api/*` call must send a valid Supabase `Authorization: Bearer` token. From Supabase → **Project Settings → API → JWT Secret**. |
+| `SUPABASE_URL` | Server | **Required** when `SUPABASE_JWT_SECRET` is set if your project uses **asymmetric** Auth JWTs (Supabase default): verification uses **JWKS**, not the legacy secret alone. Same URL as `REACT_APP_SUPABASE_URL`. |
 | `SUPABASE_URL` | Server only | Same project URL as below; Express uses it with the user’s JWT to read/write `user_app_profile` (RLS). |
 | `SUPABASE_ANON_KEY` | Server only | Same **anon public** key as below (not the service role). |
 | `REACT_APP_SUPABASE_URL` | Build + browser | Your project URL (`https://<ref>.supabase.co`). |

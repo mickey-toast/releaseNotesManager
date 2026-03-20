@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { authenticatedFetch } from './api';
-import { isSupabaseAuthConfigured } from './supabaseClient';
+import { isSupabaseAuthConfigured, supabase } from './supabaseClient';
+import { isSettingsSuperAdmin } from './settingsAdminAccess';
 import { usePermissions } from './permissionsContext';
 import { DEFAULT_TEMPLATES, getTemplates } from './templateConstants';
 import { getAuditCategoryPreferences, setAuditCategoryPreferences, ACTIVITY_CATEGORIES } from './activityLog';
@@ -69,6 +70,30 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
   const [auditCategories, setAuditCategories] = useState(getAuditCategoryPreferences());
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
+  const [appAuthEmail, setAppAuthEmail] = useState(null);
+
+  useEffect(() => {
+    if (!isSupabaseAuthConfigured() || !supabase) {
+      setAppAuthEmail(null);
+      return undefined;
+    }
+    let cancelled = false;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!cancelled) setAppAuthEmail(session?.user?.email ?? null);
+    });
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAppAuthEmail(session?.user?.email ?? null);
+    });
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const showSettingsAdminSection =
+    isSupabaseAuthConfigured() && isSettingsSuperAdmin(appAuthEmail);
 
   const handleChange = (field, value) => {
     setSettings(prev => ({ ...prev, [field]: value }));
@@ -176,16 +201,18 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
       { id: 'jiraFields', label: 'Jira Fields' },
       { id: 'templates', label: 'Templates' },
       { id: 'export', label: 'Export' },
-      { id: 'activityLog', label: 'Activity Log' }
+      { id: 'activityLog', label: 'Activity Log' },
+      { id: 'superAdmin', label: 'Admin' }
     ];
     return all.filter((s) => {
       if (s.id === 'ai' && !perms.ai) return false;
       if (s.id === 'styleGuide' && !perms.ai) return false;
       if (s.id === 'launchnotes' && !perms.launchnotes) return false;
       if (s.id === 'export' && !perms.export) return false;
+      if (s.id === 'superAdmin' && !showSettingsAdminSection) return false;
       return true;
     });
-  }, [perms.ai, perms.launchnotes, perms.export]);
+  }, [perms.ai, perms.launchnotes, perms.export, showSettingsAdminSection]);
 
   useEffect(() => {
     if (!sections.find((s) => s.id === activeSection)) {
@@ -622,6 +649,30 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
                       <span>{c.label}</span>
                     </label>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {activeSection === 'superAdmin' && showSettingsAdminSection && (
+              <div className="settings-section settings-section-admin">
+                <h3>Admin</h3>
+                <p className="settings-intro">
+                  Shortcuts for operations that apply to the whole app (not your personal Confluence/Jira profile). The admin portal is where you invite users, grant or revoke feature permissions, and manage who has the admin role in Supabase.
+                </p>
+                <p className="settings-intro settings-admin-note">
+                  This section is only shown for designated app-login accounts. Changing permissions still requires your user to be listed in <code>app_admins</code> and the server to have <code>SUPABASE_SERVICE_ROLE_KEY</code>.
+                </p>
+                <div className="settings-field settings-admin-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      onCancel?.();
+                      window.location.hash = '#/admin';
+                    }}
+                  >
+                    Open admin portal
+                  </button>
                 </div>
               </div>
             )}
