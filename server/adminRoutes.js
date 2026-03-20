@@ -38,6 +38,8 @@ router.get('/admin/permission-catalog', requireAdmin, (req, res) => {
     permissions: Object.entries(PERMISSION_KEYS).map(([key, v]) => ({
       key,
       label: v.label,
+      description: v.description,
+      covers: v.covers,
       defaultAllowed: v.defaultAllowed
     }))
   });

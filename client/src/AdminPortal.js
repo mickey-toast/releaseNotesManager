@@ -175,6 +175,45 @@ export default function AdminPortal({ onExit }) {
 
         {error && <div className="admin-portal-error">{error}</div>}
 
+        {catalog.length > 0 && (
+          <section className="admin-portal-section">
+            <h2>What each column means</h2>
+            <p className="admin-portal-hint">
+              Toggle cells change what each signed-in user can do in the app. If you never change a permission for a user, the{' '}
+              <strong>default</strong> (shown on each card) applies—there is no separate row in the database until you flip a
+              checkbox.
+            </p>
+            <div className="admin-permission-ref-grid">
+              <article className="admin-permission-ref-card admin-permission-ref-card-admin">
+                <h3 className="admin-permission-ref-title">Admin</h3>
+                <code className="admin-permission-ref-key">app_admins</code>
+                <p className="admin-permission-ref-desc">
+                  Access to <strong>this portal</strong>: invite users, list everyone, grant or revoke feature permissions,
+                  and promote other admins. Separate from the feature toggles to the right.
+                </p>
+              </article>
+              {catalog.map((c) => (
+                <article key={c.key} className="admin-permission-ref-card">
+                  <h3 className="admin-permission-ref-title">{c.label}</h3>
+                  <code className="admin-permission-ref-key">{c.key}</code>
+                  {c.description && <p className="admin-permission-ref-desc">{c.description}</p>}
+                  {Array.isArray(c.covers) && c.covers.length > 0 && (
+                    <ul className="admin-permission-ref-list">
+                      {c.covers.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="admin-permission-ref-default">
+                    Default if unset:{' '}
+                    <strong>{c.defaultAllowed !== false ? 'allowed' : 'denied'}</strong>
+                  </p>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
         <section className="admin-portal-section">
           <h2>Users & permissions</h2>
           {loading ? (
@@ -185,10 +224,14 @@ export default function AdminPortal({ onExit }) {
                 <thead>
                   <tr>
                     <th>Email</th>
-                    <th>Admin</th>
+                    <th className="admin-th-permission">
+                      <span className="admin-th-permission-label">Admin</span>
+                      <span className="admin-th-permission-sub">Portal access</span>
+                    </th>
                     {catalog.map((c) => (
-                      <th key={c.key} title={c.label}>
-                        {c.key}
+                      <th key={c.key} className="admin-th-permission" title={c.description}>
+                        <span className="admin-th-permission-label">{c.label}</span>
+                        <code className="admin-th-permission-key">{c.key}</code>
                       </th>
                     ))}
                   </tr>
