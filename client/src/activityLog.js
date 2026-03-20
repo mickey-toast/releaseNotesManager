@@ -1,7 +1,10 @@
 /**
  * Activity / audit log for Release Notes Manager.
  * Persists to localStorage. Used for showing usage and exporting work summary.
+ * When signed in with Supabase, mirrors each entry to Postgres (team audit in Troubleshooting).
  */
+
+import { getAppAuthHeaders } from './api';
 
 const STORAGE_KEY = 'releaseManagerActivityLog';
 const PREFERENCES_KEY = 'releaseManagerAuditCategories';
@@ -20,8 +23,30 @@ export const ACTIVITY_CATEGORIES = [
   { id: 'ai_compliance', label: 'AI compliance check', default: true },
   { id: 'assignment', label: 'Assign / unassign pages', default: true },
   { id: 'style_guide', label: 'Style guide refresh', default: true },
-  { id: 'settings', label: 'Settings changes', default: false }
+  { id: 'settings', label: 'Settings changes', default: false },
+  { id: 'export', label: 'Exports / imports', default: true }
 ];
+
+function queueServerAudit(category, description, details) {
+  if (typeof window === 'undefined') return;
+  void (async () => {
+    try {
+      const auth = await getAppAuthHeaders();
+      if (!auth.Authorization) return;
+      await fetch('/api/audit-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({
+          category,
+          description,
+          details: details && typeof details === 'object' && !Array.isArray(details) ? details : {}
+        })
+      });
+    } catch (_) {
+      /* never break the app */
+    }
+  })();
+}
 
 function getPreferences() {
   try {
@@ -92,6 +117,7 @@ export function logActivity(category, description, details = {}) {
     const entries = getEntriesRaw();
     entries.push(entry);
     setEntriesRaw(entries);
+    queueServerAudit(category, description, details);
   } catch (e) {
     console.warn('[Activity log] Failed to log:', e);
   }

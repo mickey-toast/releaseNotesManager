@@ -1,8 +1,12 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import { authenticatedFetch, getCredentials } from './api';
+import { usePermissions } from './permissionsContext';
 import './App.css';
 
+const AI_HUB_STATUS_ORDER = ['draft', 'inProgress', 'needsAction'];
+
 function AIHub({ pages, statuses, onRefresh }) {
+  const perms = usePermissions();
   const [step, setStep] = useState(1);
   const [selectedPages, setSelectedPages] = useState([]);
   const [customContent, setCustomContent] = useState('');
@@ -16,13 +20,10 @@ function AIHub({ pages, statuses, onRefresh }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [collapsedSections, setCollapsedSections] = useState({});
 
-  // Status order for display (excluding published and discarded - they don't need release notes)
-  const statusOrder = ['draft', 'inProgress', 'needsAction'];
-
   // Group pages by status
   const pagesByStatus = useMemo(() => {
     const grouped = {};
-    statusOrder.forEach(statusKey => {
+    AI_HUB_STATUS_ORDER.forEach(statusKey => {
       grouped[statusKey] = [];
     });
     
@@ -157,6 +158,10 @@ function AIHub({ pages, statuses, onRefresh }) {
       setLaunchNotesError('No content to create draft');
       return;
     }
+    if (!perms.launchnotes) {
+      setLaunchNotesError('LaunchNotes is disabled for your account.');
+      return;
+    }
 
     setLaunchNotesCreating(true);
     setLaunchNotesError(null);
@@ -271,6 +276,17 @@ Or in natural language:
   // Get total page count
   const totalPages = Object.values(filteredPagesByStatus).reduce((sum, pages) => sum + pages.length, 0);
 
+  if (perms.loaded && !perms.ai) {
+    return (
+      <div className="ai-hub">
+        <div className="ai-hub-header">
+          <h2>AI Hub</h2>
+          <p className="permission-denied-msg">AI features are disabled for your account. An admin can enable the <code>ai</code> permission.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="ai-hub">
       <div className="ai-hub-header">
@@ -302,7 +318,7 @@ Or in natural language:
                 
                 <div className="page-list">
                   {totalPages > 0 ? (
-                    statusOrder.map(statusKey => {
+                    AI_HUB_STATUS_ORDER.map(statusKey => {
                       const statusPages = filteredPagesByStatus[statusKey] || [];
                       if (statusPages.length === 0) return null;
                       
@@ -425,23 +441,25 @@ Or in natural language:
               <button onClick={handleBack} className="btn btn-secondary">
                 Back
               </button>
-              <div className="launchnotes-actions">
-                <label className="mcp-toggle">
-                  <input
-                    type="checkbox"
-                    checked={useMCP}
-                    onChange={(e) => setUseMCP(e.target.checked)}
-                  />
-                  Use MCP Instead
-                </label>
-                <button
-                  onClick={handleCreateLaunchNotesDraft}
-                  className="btn btn-primary"
-                  disabled={launchNotesCreating || !generatedContent.trim()}
-                >
-                  {launchNotesCreating ? 'Creating...' : 'Add LaunchNotes Draft'}
-                </button>
-              </div>
+              {perms.launchnotes && (
+                <div className="launchnotes-actions">
+                  <label className="mcp-toggle">
+                    <input
+                      type="checkbox"
+                      checked={useMCP}
+                      onChange={(e) => setUseMCP(e.target.checked)}
+                    />
+                    Use MCP Instead
+                  </label>
+                  <button
+                    onClick={handleCreateLaunchNotesDraft}
+                    className="btn btn-primary"
+                    disabled={launchNotesCreating || !generatedContent.trim()}
+                  >
+                    {launchNotesCreating ? 'Creating...' : 'Add LaunchNotes Draft'}
+                  </button>
+                </div>
+              )}
             </div>
 
             {launchNotesError && (

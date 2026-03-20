@@ -43,6 +43,9 @@ A comprehensive tool to manage the complete lifecycle of Confluence release note
 - **Age tracking** - See days since creation and last activity
 - **Page sections** - View and select specific sections of pages for LaunchNotes
 
+### Export for Claude / Cursor
+- **Export for Claude (zip)** - In Settings → Export, download a zip containing the style guide, a manifest of all pages, and one markdown file per page (with frontmatter). Unzip and use with Claude Code or Cursor to rewrite content to the style guide without using Gemini. See **INSTRUCTIONS.md** inside the zip.
+
 ### User Experience
 - **Confetti celebration** - Visual celebration when pages are moved to Published status
 - **Theme support** - Dim, Dark, and Light themes
@@ -51,28 +54,21 @@ A comprehensive tool to manage the complete lifecycle of Confluence release note
 - **Settings modal** - Centralized configuration for Confluence, Jira, LaunchNotes, AI, and Style Guide
 
 ### Multi-User Ready
-- **Client-side credentials** - All API credentials stored locally in browser (never shared)
+- **Client-side credentials** - Confluence/Jira-related secrets live in the browser; with Supabase + server env configured they also sync to Postgres per user (RLS). See [docs/USER_PROFILE_SYNC.md](./docs/USER_PROFILE_SYNC.md).
 - **Stateless server** - Server doesn't store user data, making it safe for multi-user hosting
 - **Per-user configuration** - Each user configures their own credentials and settings
+- **Optional Supabase app auth** - For public hosting, set `SUPABASE_JWT_SECRET` on the server and `REACT_APP_SUPABASE_*` on the client build so only allowed work emails (default `@toasttab.com`) can call `/api/*`. See root `.env.example` and `client/.env.example`. Sign-in options: magic link, password, and **Sign up** (email + password). To block non-Toast signups inside Supabase as well, run the SQL hook in [docs/SUPABASE_AUTH_HOOK.md](./docs/SUPABASE_AUTH_HOOK.md) (includes Supabase dashboard steps for password sign-up). With `SUPABASE_URL` + `SUPABASE_ANON_KEY` on the server, **Troubleshooting → Team audit log** lists actions by user email (see [docs/USER_PROFILE_SYNC.md](./docs/USER_PROFILE_SYNC.md)).
 
 ## Prerequisites
 
-### Required
-
-- **Node.js 18+** – [Download](https://nodejs.org/) if not already installed.
-- **Confluence Cloud** – Access to a Confluence Cloud instance (e.g. your company’s `https://yoursite.atlassian.net/wiki`).
-- **Atlassian API token** – Used for Confluence (and optionally Jira). Create one at [Atlassian Account Settings → Security → API tokens](https://id.atlassian.com/manage-profile/security/api-tokens). Use the same Atlassian account email you use for Confluence.
-
-### Optional (for full functionality)
-
-- **Jira Cloud** – Same Atlassian account and API token work for Jira. Needed for ticket linking, comments, fix versions, and bulk Jira updates.
-- **AI provider API key** – For AI Hub (release note generation), suggestions, and style-guide compliance:
-  - **Google Gemini**: [Create API key](https://makersuite.google.com/app/apikey) (or [Google AI Studio](https://aistudio.google.com/apikey)).
-  - **Anthropic Claude**: [API keys](https://console.anthropic.com/).
-  - **OpenAI**: [API keys](https://platform.openai.com/api-keys).
-- **LaunchNotes** – For creating draft announcements from release notes: API URL, Project ID, and API token from your [LaunchNotes](https://app.launchnotes.io) project.
-
-Credentials are entered in the app’s **Settings** modal and stored in your browser; no `.env` file is required for normal use. For server-side or Electron fallback, optional `.env` variables are documented in [MULTI_USER_HOSTING.md](./MULTI_USER_HOSTING.md).
+- Node.js 18+ installed
+- Confluence Cloud account with API access
+- Jira Cloud account (optional, for Jira integration features)
+- API token from [Atlassian Account Settings](https://id.atlassian.com/manage-profile/security/api-tokens)
+- AI API key (optional, for AI features):
+  - Google Gemini: [Get API key](https://makersuite.google.com/app/apikey)
+  - Anthropic Claude: [Get API key](https://console.anthropic.com/)
+  - OpenAI: [Get API key](https://platform.openai.com/api-keys)
 
 ## Quick Start
 
@@ -89,7 +85,7 @@ This will:
 
 1. **Navigate to the project:**
    ```bash
-   cd /path/to/ReleaseNoteManager
+   cd /Users/mickey.farmer/Documents/Tools/mickeysToolsandThings/confluence-release-manager
    ```
 
 2. **Install dependencies:**
@@ -104,6 +100,10 @@ This will:
 
 4. **Open in browser:**
    Navigate to [http://localhost:3000](http://localhost:3000)
+
+## Deploy to Render (shared hosting)
+
+You deploy **one Render Web Service**: the Node server serves both the API and the built React app in production. Step-by-step commands, health checks, and optional `render.yaml` are in **[docs/RENDER.md](docs/RENDER.md)**. For **Vercel**, see **[docs/VERCEL.md](docs/VERCEL.md)** (why the full Express app isn’t a drop-in there, and when a Vercel frontend + API elsewhere makes sense).
 
 ## First Time Setup
 

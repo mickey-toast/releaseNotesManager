@@ -1,5 +1,14 @@
 // API utility functions with credential management
 
+import { supabase } from './supabaseClient';
+
+export async function getAppAuthHeaders() {
+  if (!supabase) return {};
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session?.access_token) return {};
+  return { Authorization: `Bearer ${session.access_token}` };
+}
+
 export const getCredentials = () => {
   const settings = localStorage.getItem('confluenceSettings');
   if (!settings) return null;
@@ -10,7 +19,7 @@ export const getCredentials = () => {
   }
 };
 
-const getAuthHeaders = () => {
+export const getAuthHeaders = () => {
   const creds = getCredentials();
   if (!creds) return {};
   
@@ -48,6 +57,7 @@ export const authenticatedFetch = async (url, options = {}) => {
   const headers = {
     'Content-Type': 'application/json',
     ...getAuthHeaders(),
+    ...(await getAppAuthHeaders()),
     ...options.headers
   };
   
@@ -68,6 +78,9 @@ export const authenticatedFetch = async (url, options = {}) => {
     sanitizedHeaders['X-Atlassian-Email'] = email.includes('@') 
       ? `***@${email.split('@')[1]}` 
       : '***REDACTED***';
+  }
+  if (sanitizedHeaders.Authorization) {
+    sanitizedHeaders.Authorization = 'Bearer ***REDACTED***';
   }
   
   // Log request

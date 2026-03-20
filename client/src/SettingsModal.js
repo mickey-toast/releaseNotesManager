@@ -1,4 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { authenticatedFetch } from './api';
+import { isSupabaseAuthConfigured } from './supabaseClient';
+import { usePermissions } from './permissionsContext';
 import { DEFAULT_TEMPLATES, getTemplates } from './templateConstants';
 import { getAuditCategoryPreferences, setAuditCategoryPreferences, ACTIVITY_CATEGORIES } from './activityLog';
 
@@ -17,9 +20,10 @@ const AVAILABLE_FIELDS = [
   { id: 'epicKey', label: 'Epic Key', default: false }
 ];
 
-const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide, styleGuideStatus, styleGuideRefreshing, onMasterExport, masterExportLoading }) => {
+const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide, styleGuideStatus, styleGuideRefreshing, onMasterExport, masterExportLoading, onOpenExportForClaudeModal, onImportFromClaude, importFromClaudeLoading }) => {
+  const perms = usePermissions();
   const [activeSection, setActiveSection] = useState('authentication');
-  
+
   // Get field preferences from localStorage or use defaults
   const getDefaultFieldPreferences = () => {
     const saved = localStorage.getItem('jiraFieldPreferences');
@@ -75,7 +79,7 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
     setTesting(true);
     setTestResult(null);
     try {
-      const response = await fetch('/api/test-connection', {
+      const response = await authenticatedFetch('/api/test-connection', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -162,17 +166,32 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
     setAuditCategories(prev => ({ ...prev, [categoryId]: !prev[categoryId] }));
   };
 
-  const sections = [
-    { id: 'authentication', label: 'Authentication' },
-    { id: 'configuration', label: 'Configuration' },
-    { id: 'ai', label: 'AI Settings' },
-    { id: 'styleGuide', label: 'Style Guide' },
-    { id: 'launchnotes', label: 'LaunchNotes' },
-    { id: 'jiraFields', label: 'Jira Fields' },
-    { id: 'templates', label: 'Templates' },
-    { id: 'export', label: 'Export' },
-    { id: 'activityLog', label: 'Activity Log' }
-  ];
+  const sections = useMemo(() => {
+    const all = [
+      { id: 'authentication', label: 'Authentication' },
+      { id: 'configuration', label: 'Configuration' },
+      { id: 'ai', label: 'AI Settings' },
+      { id: 'styleGuide', label: 'Style Guide' },
+      { id: 'launchnotes', label: 'LaunchNotes' },
+      { id: 'jiraFields', label: 'Jira Fields' },
+      { id: 'templates', label: 'Templates' },
+      { id: 'export', label: 'Export' },
+      { id: 'activityLog', label: 'Activity Log' }
+    ];
+    return all.filter((s) => {
+      if (s.id === 'ai' && !perms.ai) return false;
+      if (s.id === 'styleGuide' && !perms.ai) return false;
+      if (s.id === 'launchnotes' && !perms.launchnotes) return false;
+      if (s.id === 'export' && !perms.export) return false;
+      return true;
+    });
+  }, [perms.ai, perms.launchnotes, perms.export]);
+
+  useEffect(() => {
+    if (!sections.find((s) => s.id === activeSection)) {
+      setActiveSection('authentication');
+    }
+  }, [sections, activeSection]);
 
   return (
     <div className="modal-overlay" onClick={onCancel}>
@@ -201,7 +220,9 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
               <div className="settings-section">
                 <h3>Authentication</h3>
                 <p className="settings-intro">
-                  Enter your Atlassian credentials. These will be stored locally in your browser and never shared.
+                  {isSupabaseAuthConfigured()
+                    ? 'Enter your Atlassian credentials. They are saved in your browser and synced to your account (Postgres) when you click Save — only you can read them via login.'
+                    : 'Enter your Atlassian credentials. These will be stored locally in your browser and never shared.'}
                 </p>
                 <div className="settings-field">
                   <label>Confluence Base URL</label>
@@ -546,6 +567,40 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
                   >
                     {masterExportLoading ? 'Exporting…' : 'Export all statuses to CSV (master)'}
                   </button>
+                </div>
+                <div className="export-claude-block">
+                  <p className="settings-intro" style={{ marginBottom: '8px' }}>
+                    <strong>Export to Cursor</strong> — Zip with style guide, manifest, and one .md per page. Opens a preferences modal to filter by status, assignee, fix version, LOB, and launch date; then export to zip.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-primary export-master-btn"
+                    onClick={() => onOpenExportForClaudeModal?.()}
+                    disabled={!onOpenExportForClaudeModal}
+                  >
+                    Export to Cursor (zip)
+                  </button>
+                </div>
+                <div className="import-claude-block" style={{ marginTop: '1.25rem' }}>
+                  <p className="settings-intro" style={{ marginBottom: '8px' }}>
+                    <strong>Import from Claude output</strong> — Upload a zip of your edited folder (with a <strong>drafts</strong> folder). Drafts are listed so you can send them to LaunchNotes.
+                  </p>
+                  <label className="import-from-claude-label">
+                    <span className="btn btn-secondary export-master-btn" style={{ display: 'inline-block', pointerEvents: importFromClaudeLoading ? 'none' : 'auto' }}>
+                      {importFromClaudeLoading ? 'Importing…' : 'Choose zip to import drafts'}
+                    </span>
+                    <input
+                      type="file"
+                      accept=".zip"
+                      style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) onImportFromClaude?.(file);
+                        e.target.value = '';
+                      }}
+                      disabled={importFromClaudeLoading || !onImportFromClaude}
+                    />
+                  </label>
                 </div>
               </div>
             )}

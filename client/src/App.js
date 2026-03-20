@@ -1,10 +1,15 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import './App.css';
 import SettingsModal from './SettingsModal';
+import ExportForClaudeModal from './ExportForClaudeModal';
 import AIHub from './AIHub';
 import ActivityLogModal from './ActivityLogModal';
-import { authenticatedFetch, hasCredentials, getCredentials, shouldShowField, getDebugLogs, clearDebugLogs } from './api';
-import { logActivity } from './activityLog';
+import { authenticatedFetch, getAuthHeaders, getAppAuthHeaders, hasCredentials, getCredentials, shouldShowField, getDebugLogs, clearDebugLogs } from './api';
+import { signOutApp, isSupabaseAuthConfigured } from './supabaseClient';
+import { hydrateSettingsFromCloud, saveSettingsProfileToCloud } from './cloudProfile';
+import { usePermissions } from './permissionsContext';
+import AdminPortal from './AdminPortal';
+import { logActivity, ACTIVITY_CATEGORIES } from './activityLog';
 import { getTemplates } from './templateConstants';
 
 // Confetti Celebration Component
@@ -142,6 +147,7 @@ const getStatusColor = (category) => {
 
 // Page Detail Panel component
 const PageDetailPanel = ({ page, onClose, statuses, currentStatus, onMove, onViewComments, onAddComment, onViewJiraComments, isAssigned, onAssign, onUnassign, onAddToLaunchNotes, onAISuggestions, onCheckCompliance, onSyncFromConfluence, syncingFromConfluence, onRefreshFromJira, refreshingJira, onNotesUpdated, addToast }) => {
+  const { ai: canAi, launchnotes: canLn } = usePermissions();
   const [jiraData, setJiraData] = useState(null);
   const [jiraLoading, setJiraLoading] = useState(false);
   const [jiraError, setJiraError] = useState(null);
@@ -290,19 +296,21 @@ const PageDetailPanel = ({ page, onClose, statuses, currentStatus, onMove, onVie
                   </button>
                 )
               ))}
-              <button 
-                className="quick-action-btn launchnotes-btn"
-                onClick={() => {
-                  if (onAddToLaunchNotes) {
-                    onAddToLaunchNotes([page]);
-                  } else {
-                    alert('LaunchNotes functionality is not available. Please check your settings.');
-                  }
-                }}
-                title="Create draft in LaunchNotes"
-              >
-                Add to LaunchNotes
-              </button>
+              {canLn && (
+                <button 
+                  className="quick-action-btn launchnotes-btn"
+                  onClick={() => {
+                    if (onAddToLaunchNotes) {
+                      onAddToLaunchNotes([page]);
+                    } else {
+                      alert('LaunchNotes functionality is not available. Please check your settings.');
+                    }
+                  }}
+                  title="Create draft in LaunchNotes"
+                >
+                  Add to LaunchNotes
+                </button>
+              )}
             </div>
           </section>
 
@@ -390,20 +398,24 @@ const PageDetailPanel = ({ page, onClose, statuses, currentStatus, onMove, onVie
               <button className="btn btn-secondary" onClick={() => onViewComments(page)}>
                 View Comments
               </button>
-              <button 
-                className="btn btn-secondary" 
-                onClick={() => onAISuggestions && onAISuggestions(page)}
-                title="Get AI-powered suggestions for improving this release note"
-              >
-                AI Suggestions
-              </button>
-              <button 
-                className="btn btn-secondary" 
-                onClick={() => onCheckCompliance && onCheckCompliance(page)}
-                title="Check style guide compliance"
-              >
-                ✓ Check Compliance
-              </button>
+              {canAi && (
+                <>
+                  <button 
+                    className="btn btn-secondary" 
+                    onClick={() => onAISuggestions && onAISuggestions(page)}
+                    title="Get AI-powered suggestions for improving this release note"
+                  >
+                    AI Suggestions
+                  </button>
+                  <button 
+                    className="btn btn-secondary" 
+                    onClick={() => onCheckCompliance && onCheckCompliance(page)}
+                    title="Check style guide compliance"
+                  >
+                    ✓ Check Compliance
+                  </button>
+                </>
+              )}
             </div>
             
             {/* Page Body */}
@@ -567,6 +579,7 @@ const PageDetailPanel = ({ page, onClose, statuses, currentStatus, onMove, onVie
 
 // Overflow menu component
 const OverflowMenu = ({ page, statuses, currentStatus, onMove, onViewComments, isAssigned, onAssign, onUnassign, onAddToLaunchNotes }) => {
+  const { launchnotes: canLn } = usePermissions();
   const [isOpen, setIsOpen] = useState(false);
   const [dropdownStyle, setDropdownStyle] = useState({});
   const [copied, setCopied] = useState(false);
@@ -668,20 +681,22 @@ const OverflowMenu = ({ page, statuses, currentStatus, onMove, onViewComments, i
             >
               Open in Confluence
             </a>
-            <>
-              <div className="overflow-divider" />
-              <button onClick={() => { 
-                if (onAddToLaunchNotes) {
-                  onAddToLaunchNotes([page]); 
-                  setIsOpen(false);
-                } else {
-                  alert('LaunchNotes functionality is not available. Please check your settings.');
-                  setIsOpen(false);
-                }
-              }}>
-                Add to LaunchNotes
-              </button>
-            </>
+            {canLn && (
+              <>
+                <div className="overflow-divider" />
+                <button onClick={() => { 
+                  if (onAddToLaunchNotes) {
+                    onAddToLaunchNotes([page]); 
+                    setIsOpen(false);
+                  } else {
+                    alert('LaunchNotes functionality is not available. Please check your settings.');
+                    setIsOpen(false);
+                  }
+                }}>
+                  Add to LaunchNotes
+                </button>
+              </>
+            )}
             <div className="overflow-divider" />
             <div className="overflow-label">Move to...</div>
             {Object.entries(statuses).map(([key, status]) => (
@@ -1133,7 +1148,9 @@ const LaunchNotesImportModal = ({ pages, onConfirm, onCancel, loading: externalL
           },
           body: JSON.stringify({
             pageId: page.id,
-            title: page.title
+            title: page.title,
+            ...(page.content != null && page.content !== '' && { content: page.content }),
+            ...(page.jiraTicket && { jiraTicket: page.jiraTicket })
           })
         });
 
@@ -1179,7 +1196,9 @@ const LaunchNotesImportModal = ({ pages, onConfirm, onCancel, loading: externalL
               ))}
             </div>
             <div className="move-confirm-hint">
-              The page content will be converted to Markdown format and sent to LaunchNotes as a draft announcement.
+              {pages[0]?.content != null && pages[0].content !== ''
+                ? 'The rewritten content from each draft will be sent to LaunchNotes as a draft announcement (with Jira link when available).'
+                : 'The page content will be converted to Markdown format and sent to LaunchNotes as a draft announcement.'}
             </div>
           </div>
           <div className="modal-actions">
@@ -1435,6 +1454,7 @@ const LabelSelector = ({ selectedLabels, onChange }) => {
 
 // Bulk Edit Modal - unified modal for all bulk actions
 const BulkEditModal = ({ pages, currentStatus, statuses, onConfirm, onCancel, loading, onAssignToMe, onAddToLaunchNotes }) => {
+  const { launchnotes: canLn } = usePermissions();
   const [selectedStatus, setSelectedStatus] = useState(null); // null = keep current, or status key
   const [jiraComment, setJiraComment] = useState('');
   const [confluenceComment, setConfluenceComment] = useState('');
@@ -1446,6 +1466,10 @@ const BulkEditModal = ({ pages, currentStatus, statuses, onConfirm, onCancel, lo
   const [jiraTickets, setJiraTickets] = useState([]);
   const [loadingTickets, setLoadingTickets] = useState(true);
   const [activeTab, setActiveTab] = useState('location'); // 'location', 'assign', 'labels', 'comments'
+
+  useEffect(() => {
+    if (!canLn && activeTab === 'launchnotes') setActiveTab('location');
+  }, [canLn, activeTab]);
 
   // Load Jira ticket info for all pages with tickets
   useEffect(() => {
@@ -1645,12 +1669,14 @@ const BulkEditModal = ({ pages, currentStatus, statuses, onConfirm, onCancel, lo
               >
                 Comments
               </button>
-              <button
-                className={`bulk-edit-tab ${activeTab === 'launchnotes' ? 'active' : ''}`}
-                onClick={() => setActiveTab('launchnotes')}
-              >
-                LaunchNotes
-              </button>
+              {canLn && (
+                <button
+                  className={`bulk-edit-tab ${activeTab === 'launchnotes' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('launchnotes')}
+                >
+                  LaunchNotes
+                </button>
+              )}
             </div>
 
             {/* Location Tab */}
@@ -2687,6 +2713,7 @@ const MoveConfirmModal = ({ page, targetStatus, statuses, onConfirm, onCancel, l
 
 // Troubleshooting Panel Component
 const TroubleshootingPanel = ({ onClose }) => {
+  const [mainTab, setMainTab] = useState('http'); // 'http' | 'audit'
   const [logs, setLogs] = useState([]);
   const [selectedLog, setSelectedLog] = useState(null);
   const [filter, setFilter] = useState('all'); // 'all', 'errors', 'success'
@@ -2695,6 +2722,47 @@ const TroubleshootingPanel = ({ onClose }) => {
   const [fixVersionDebugResult, setFixVersionDebugResult] = useState(null);
   const [fixVersionDebugLoading, setFixVersionDebugLoading] = useState(false);
   const [fixVersionDebugError, setFixVersionDebugError] = useState(null);
+  const [auditEntries, setAuditEntries] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState(null);
+  const [auditSearch, setAuditSearch] = useState('');
+  const [selectedAudit, setSelectedAudit] = useState(null);
+
+  const categoryLabels = useMemo(
+    () => ACTIVITY_CATEGORIES.reduce((acc, c) => {
+      acc[c.id] = c.label;
+      return acc;
+    }, {}),
+    []
+  );
+
+  const loadAuditEntries = useCallback(async () => {
+    setAuditLoading(true);
+    setAuditError(null);
+    try {
+      const res = await authenticatedFetch('/api/audit-log?limit=300');
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 404 && data.auditLog === false) {
+        setAuditEntries([]);
+        setAuditError('Team audit log needs Supabase on the server (SUPABASE_JWT_SECRET, SUPABASE_URL, SUPABASE_ANON_KEY) and the app_audit_log table.');
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || data.details || 'Failed to load audit log');
+      setAuditEntries(data.entries || []);
+      setSelectedAudit(null);
+    } catch (e) {
+      setAuditError(e.message || String(e));
+      setAuditEntries([]);
+    } finally {
+      setAuditLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (mainTab !== 'audit') return undefined;
+    loadAuditEntries();
+    return undefined;
+  }, [mainTab, loadAuditEntries]);
 
   useEffect(() => {
     // Set up callback for log updates
@@ -2728,6 +2796,15 @@ const TroubleshootingPanel = ({ onClose }) => {
     
     return matchesFilter && matchesSearch;
   });
+
+  const filteredAuditEntries = useMemo(() => {
+    const q = auditSearch.trim().toLowerCase();
+    if (!q) return auditEntries;
+    return auditEntries.filter((row) => {
+      const blob = `${row.user_email || ''} ${row.category || ''} ${row.description || ''} ${JSON.stringify(row.details || {})}`.toLowerCase();
+      return blob.includes(q);
+    });
+  }, [auditEntries, auditSearch]);
 
   const handleClear = () => {
     clearDebugLogs();
@@ -2763,13 +2840,35 @@ const TroubleshootingPanel = ({ onClose }) => {
         <div className="modal-header">
           <h2>Troubleshooting Panel</h2>
           <div className="troubleshooting-header-actions">
-            <button className="btn btn-secondary btn-sm" onClick={handleClear}>
-              Clear Logs
-            </button>
-            <button className="close-btn" onClick={onClose}>×</button>
+            {mainTab === 'http' && (
+              <button type="button" className="btn btn-secondary btn-sm" onClick={handleClear}>
+                Clear Logs
+              </button>
+            )}
+            <button type="button" className="close-btn" onClick={onClose}>×</button>
           </div>
         </div>
+
+        <div className="troubleshooting-main-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            className={`troubleshooting-main-tab ${mainTab === 'http' ? 'active' : ''}`}
+            onClick={() => { setMainTab('http'); setSelectedAudit(null); }}
+          >
+            HTTP request log
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={`troubleshooting-main-tab ${mainTab === 'audit' ? 'active' : ''}`}
+            onClick={() => setMainTab('audit')}
+          >
+            Team audit log
+          </button>
+        </div>
         
+        {mainTab === 'http' ? (
         <div className="troubleshooting-body">
           <div className="troubleshooting-sidebar">
             <div className="troubleshooting-debug-fix-version">
@@ -2972,6 +3071,100 @@ const TroubleshootingPanel = ({ onClose }) => {
             )}
           </div>
         </div>
+        ) : (
+        <div className="troubleshooting-body">
+          <div className="troubleshooting-sidebar">
+            <div className="troubleshooting-audit-toolbar">
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={loadAuditEntries}
+                disabled={auditLoading}
+              >
+                {auditLoading ? 'Loading…' : 'Refresh'}
+              </button>
+              <input
+                type="search"
+                className="troubleshooting-search"
+                placeholder="Search by email, action, category…"
+                value={auditSearch}
+                onChange={(e) => setAuditSearch(e.target.value)}
+              />
+            </div>
+            {auditError && (
+              <div className="troubleshooting-audit-error">{auditError}</div>
+            )}
+            <div className="troubleshooting-log-list troubleshooting-audit-list">
+              {!auditLoading && filteredAuditEntries.length === 0 && !auditError && (
+                <div className="troubleshooting-empty">No audit entries yet</div>
+              )}
+              {filteredAuditEntries.map((row) => (
+                <div
+                  key={row.id}
+                  className={`troubleshooting-log-item troubleshooting-audit-item ${selectedAudit?.id === row.id ? 'selected' : ''}`}
+                  onClick={() => setSelectedAudit(row)}
+                >
+                  <div className="troubleshooting-audit-email">{row.user_email || '—'}</div>
+                  <div className="troubleshooting-audit-desc">{row.description}</div>
+                  <div className="log-item-meta">
+                    <span className="troubleshooting-audit-cat">{categoryLabels[row.category] || row.category}</span>
+                    <span className="log-time">
+                      {row.created_at ? new Date(row.created_at).toLocaleString() : '—'}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="troubleshooting-detail">
+            {selectedAudit ? (
+              <div className="troubleshooting-detail-content">
+                <div className="detail-section">
+                  <div className="detail-section-header">
+                    <h3>Audit entry</h3>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => copyToClipboard(JSON.stringify(selectedAudit, null, 2))}
+                    >
+                      Copy JSON
+                    </button>
+                  </div>
+                  <div className="detail-info">
+                    <div className="detail-info-row">
+                      <span className="detail-label">User</span>
+                      <span className="detail-value">{selectedAudit.user_email}</span>
+                    </div>
+                    <div className="detail-info-row">
+                      <span className="detail-label">When</span>
+                      <span className="detail-value">
+                        {selectedAudit.created_at ? new Date(selectedAudit.created_at).toLocaleString() : '—'}
+                      </span>
+                    </div>
+                    <div className="detail-info-row">
+                      <span className="detail-label">Category</span>
+                      <span className="detail-value">{categoryLabels[selectedAudit.category] || selectedAudit.category}</span>
+                    </div>
+                    <div className="detail-info-row">
+                      <span className="detail-label">Action</span>
+                      <span className="detail-value">{selectedAudit.description}</span>
+                    </div>
+                  </div>
+                  {selectedAudit.details != null && Object.keys(selectedAudit.details).length > 0 && (
+                    <div className="detail-json">
+                      <pre>{JSON.stringify(selectedAudit.details, null, 2)}</pre>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="troubleshooting-empty-detail">
+                Select an entry to see details. All signed-in users can see actions from every teammate.
+              </div>
+            )}
+          </div>
+        </div>
+        )}
       </div>
     </div>
   );
@@ -3158,6 +3351,7 @@ const MyTasksView = ({ tasksByStatus, statuses, onPageClick, onMove, onViewComme
 
 // Bulk actions bar
 const BulkActionsBar = ({ selectedCount, onEdit, onClearSelection, onBatchAIGenerate, batchAIGenerating, onSyncFromConfluence, syncingFromConfluence, onRefreshFromJira, refreshingJira, hasJiraTickets }) => {
+  const { ai: canAi } = usePermissions();
   if (selectedCount === 0) return null;
 
   return (
@@ -3190,14 +3384,16 @@ const BulkActionsBar = ({ selectedCount, onEdit, onClearSelection, onBatchAIGene
             {refreshingJira ? 'Refreshing…' : '↻ Refresh from Jira'}
           </button>
         )}
-        <button 
-          className="btn btn-primary btn-sm"
-          onClick={onBatchAIGenerate}
-          disabled={batchAIGenerating}
-          title="Generate AI release notes for selected pages"
-        >
-          {batchAIGenerating ? 'Generating...' : 'Batch AI Generate'}
-        </button>
+        {canAi && (
+          <button 
+            className="btn btn-primary btn-sm"
+            onClick={onBatchAIGenerate}
+            disabled={batchAIGenerating}
+            title="Generate AI release notes for selected pages"
+          >
+            {batchAIGenerating ? 'Generating...' : 'Batch AI Generate'}
+          </button>
+        )}
         <button className="btn btn-secondary btn-sm" onClick={onClearSelection}>
           Clear
         </button>
@@ -3207,6 +3403,7 @@ const BulkActionsBar = ({ selectedCount, onEdit, onClearSelection, onBatchAIGene
 };
 
 function App() {
+  const perms = usePermissions();
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -3234,6 +3431,7 @@ function App() {
   const [fixVersionFilter, setFixVersionFilter] = useState('');
   const [timeFilter, setTimeFilter] = useState(''); // '', 'today', 'thisWeek', 'thisMonth'
   const [showSettings, setShowSettings] = useState(false);
+  const [showExportForClaudeModal, setShowExportForClaudeModal] = useState(false);
   const [showActivityLog, setShowActivityLog] = useState(false);
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [lastMove, setLastMove] = useState(null); // Track last move for undo
@@ -3244,6 +3442,26 @@ function App() {
   });
   const [autoRefreshInterval, setAutoRefreshInterval] = useState(null);
   const [currentView, setCurrentView] = useState('status'); // 'status' or 'myTasks'
+  const [adminPortal, setAdminPortal] = useState(() =>
+    typeof window !== 'undefined' &&
+    (window.location.hash === '#/admin' || (window.location.hash || '').startsWith('#/admin'))
+  );
+
+  useEffect(() => {
+    const onHash = () => {
+      setAdminPortal(
+        window.location.hash === '#/admin' || (window.location.hash || '').startsWith('#/admin')
+      );
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  useEffect(() => {
+    if (!perms.loaded || perms.ai) return;
+    setCurrentView((v) => (v === 'aiHub' ? 'status' : v));
+  }, [perms.loaded, perms.ai]);
+
   const [currentUser, setCurrentUser] = useState(null);
   const [myTasks, setMyTasks] = useState([]);
   const [myTasksLoading, setMyTasksLoading] = useState(false);
@@ -3256,13 +3474,6 @@ function App() {
   });
   const lastAssignedIdsRef = React.useRef('');
   
-  // Check for credentials on mount
-  useEffect(() => {
-    if (!hasCredentials()) {
-      setShowSettings(true);
-    }
-  }, []);
-
   // Save assigned pages to localStorage whenever it changes
   useEffect(() => {
     localStorage.setItem('assignedPageIds', JSON.stringify(Array.from(assignedPageIds)));
@@ -3307,12 +3518,18 @@ function App() {
     return assignedPageIds.has(pageId);
   }, [assignedPageIds]);
 
-  const handleSaveSettings = (settings) => {
+  const handleSaveSettings = async (settings) => {
     localStorage.setItem('confluenceSettings', JSON.stringify(settings));
     logActivity('settings', 'Settings saved', {});
+    const cloudResult = await saveSettingsProfileToCloud(settings);
     setShowSettings(false);
-    addToast('Settings saved successfully', 'success');
-    // Reload config and pages
+    if (cloudResult === false) {
+      addToast('Saved on this device; could not sync to your account.', 'warning');
+    } else if (cloudResult === true) {
+      addToast('Settings saved and synced to your account.', 'success');
+    } else {
+      addToast('Settings saved successfully', 'success');
+    }
     fetchConfig();
     fetchPages();
     fetchStats();
@@ -4014,9 +4231,20 @@ function App() {
   }, []); // No dependencies - reads from ref
 
   useEffect(() => {
-    fetchConfig();
-    fetchStats();
-    fetchCurrentUser();
+    let cancelled = false;
+    (async () => {
+      await hydrateSettingsFromCloud();
+      if (cancelled) return;
+      if (!hasCredentials()) {
+        setShowSettings(true);
+      }
+      fetchConfig();
+      fetchStats();
+      fetchCurrentUser();
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Only run once on mount
 
@@ -4254,6 +4482,10 @@ function App() {
   }, [filteredPages, sortColumn, sortDirection]);
 
   const handleExportToCsv = useCallback(() => {
+    if (!perms.export) {
+      addToast('Export is disabled for your account.', 'error');
+      return;
+    }
     const escapeCsvCell = (val) => {
       if (val === null || val === undefined) return '';
       const s = String(val).trim();
@@ -4293,10 +4525,19 @@ function App() {
     a.click();
     URL.revokeObjectURL(url);
     addToast(`Exported ${sortedPages.length} page(s) to CSV. You can import this file into Google Sheets (File → Import → Upload).`, 'success');
-  }, [sortedPages, statuses, currentStatus, addToast]);
+    logActivity('export', `Exported ${sortedPages.length} page(s) to CSV (current board)`, {
+      scope: 'status_csv',
+      status: currentStatus,
+      count: sortedPages.length
+    });
+  }, [sortedPages, statuses, currentStatus, addToast, perms.export]);
 
   const [masterExportLoading, setMasterExportLoading] = useState(false);
   const handleMasterExportToCsv = useCallback(async () => {
+    if (!perms.export) {
+      addToast('Export is disabled for your account.', 'error');
+      return;
+    }
     const statusKeys = config?.statuses ? Object.keys(config.statuses) : [];
     if (statusKeys.length === 0) {
       addToast('No statuses configured. Check settings.', 'error');
@@ -4352,12 +4593,90 @@ function App() {
       a.click();
       URL.revokeObjectURL(url);
       addToast(`Exported ${allPages.length} page(s) from all statuses to CSV. Import into Google Sheets via File → Import → Upload.`, 'success');
+      logActivity('export', `Exported ${allPages.length} page(s) to CSV (all statuses)`, {
+        scope: 'master_csv',
+        count: allPages.length
+      });
     } catch (err) {
       addToast(err.message || 'Master export failed', 'error');
     } finally {
       setMasterExportLoading(false);
     }
-  }, [config, statuses, addToast, authenticatedFetch]);
+  }, [config, statuses, addToast, authenticatedFetch, perms.export]);
+
+  const [exportForClaudeLoading, setExportForClaudeLoading] = useState(false);
+  const [importFromClaudeLoading, setImportFromClaudeLoading] = useState(false);
+  const handleImportFromClaude = useCallback(async (file) => {
+    if (!perms.export) {
+      addToast('Export/import tools are disabled for your account.', 'error');
+      return;
+    }
+    if (!file || !file.name) return;
+    setImportFromClaudeLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('zip', file);
+      const headers = { ...getAuthHeaders(), ...(await getAppAuthHeaders()) };
+      delete headers['Content-Type'];
+      const response = await fetch('/api/import-from-claude', { method: 'POST', headers, body: formData });
+      const data = await response.json();
+      if (!response.ok) {
+        addToast(data.details || data.error || 'Import failed', 'error');
+        return;
+      }
+      if (!data.drafts || data.drafts.length === 0) {
+        addToast('No draft files found in the zip. Zip the folder that contains the drafts/ folder (e.g. the whole export folder), not just the contents of drafts/.', 'warning');
+        return;
+      }
+      setShowSettings(false);
+      setLaunchnotesImportAction({ pages: data.drafts });
+      addToast(`Imported ${data.drafts.length} draft(s). Review and send to LaunchNotes.`, 'success');
+      logActivity('export', `Imported ${data.drafts.length} draft(s) from Claude zip`, {
+        scope: 'claude_zip_import',
+        count: data.drafts.length,
+        fileName: file.name
+      });
+    } catch (err) {
+      addToast(err.message || 'Import failed', 'error');
+    } finally {
+      setImportFromClaudeLoading(false);
+    }
+  }, [addToast, perms.export]);
+  const handleExportForClaude = useCallback(async (payload) => {
+    if (!perms.export) {
+      addToast('Export is disabled for your account.', 'error');
+      return;
+    }
+    setExportForClaudeLoading(true);
+    try {
+      const body = typeof payload === 'object' && payload !== null
+        ? payload
+        : (Array.isArray(payload) && payload.length > 0 ? { statuses: payload } : {});
+      const response = await authenticatedFetch('/api/export-for-claude', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: 'Export failed' }));
+        addToast(err.details || err.error || 'Export failed', 'error');
+        return;
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `release-notes-for-claude-${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      addToast('Export for Claude downloaded. Unzip and use with Claude Code or Cursor (see INSTRUCTIONS.md).', 'success');
+      logActivity('export', 'Downloaded Export for Claude / Cursor zip', { scope: 'claude_zip_export' });
+      setShowExportForClaudeModal(false);
+    } catch (err) {
+      addToast(err.message || 'Export for Claude failed', 'error');
+    } finally {
+      setExportForClaudeLoading(false);
+    }
+  }, [addToast, authenticatedFetch, perms.export]);
 
   const staleCount = pages.filter(p => p.isStale).length;
 
@@ -4369,6 +4688,14 @@ function App() {
   const [complianceCheck, setComplianceCheck] = useState(null);
   const [draggedPage, setDraggedPage] = useState(null);
   const [launchnotesImportAction, setLaunchnotesImportAction] = useState(null);
+  const [importedFromClaudePageIds, setImportedFromClaudePageIds] = useState(() => {
+    try {
+      const raw = localStorage.getItem('claudeImportedPageIds');
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
   const [styleGuideStatus, setStyleGuideStatus] = useState(null);
   const [styleGuideRefreshing, setStyleGuideRefreshing] = useState(false);
 
@@ -4381,14 +4708,54 @@ function App() {
   }, [selectedPages, sortedPages]);
 
   const handleAddToLaunchNotes = useCallback((pages) => {
+    if (!perms.launchnotes) {
+      addToast('LaunchNotes is disabled for your account.', 'error');
+      return;
+    }
     setBulkEditAction(null); // Close bulk edit modal if open
     setLaunchnotesImportAction({ pages });
-  }, []);
+  }, [perms.launchnotes, addToast]);
 
-  const handleLaunchNotesImportComplete = useCallback((results) => {
+  const handleLaunchNotesImportComplete = useCallback(async (results) => {
     const successCount = results ? results.filter(r => r.success).length : 0;
     const failCount = results ? results.filter(r => !r.success).length : 0;
-    
+    const wasFromClaudeImport = results && results.some(r => r.page && r.page.content != null && r.page.content !== '');
+    if (wasFromClaudeImport && results) {
+      const ids = results.filter(r => r.success && r.page?.id).map(r => r.page.id);
+      if (ids.length > 0) {
+        setImportedFromClaudePageIds(prev => {
+          const next = new Set(prev);
+          ids.forEach(id => next.add(id));
+          try {
+            localStorage.setItem('claudeImportedPageIds', JSON.stringify([...next]));
+          } catch (_) {}
+          return next;
+        });
+      }
+      const confluenceUpdates = results
+        .filter(r => r.success && r.page?.id && r.page?.content != null && r.page.content !== '')
+        .map(r => ({ pageId: r.page.id, content: r.page.content }));
+      if (confluenceUpdates.length > 0) {
+        try {
+          const res = await authenticatedFetch('/api/pages/prepend-imported-content', {
+            method: 'POST',
+            body: JSON.stringify({ updates: confluenceUpdates })
+          });
+          const data = await res.json();
+          if (res.ok && data.success) {
+            const ok = data.success.length;
+            const failed = (data.failed || []).length;
+            if (failed === 0) {
+              addToast(`Updated ${ok} Confluence page${ok !== 1 ? 's' : ''} with rewritten content.`, 'success');
+            } else {
+              addToast(`Updated ${ok} Confluence page(s); ${failed} failed.`, 'warning');
+            }
+          }
+        } catch (_) {
+          addToast('Confluence page update failed.', 'warning');
+        }
+      }
+    }
     if (results && results.length > 0) {
       if (successCount > 0) {
         logActivity('launchnotes', `Created ${successCount} draft(s) in LaunchNotes`, { count: successCount });
@@ -4399,10 +4766,15 @@ function App() {
         addToast(`Created ${successCount} draft${successCount !== 1 ? 's' : ''}, ${failCount} failed`, 'error');
       }
     }
-  }, [addToast]);
+    setLaunchnotesImportAction(null);
+  }, [addToast, authenticatedFetch]);
 
   // Batch AI Generation
   const handleBatchAIGenerate = useCallback(async () => {
+    if (!perms.ai) {
+      addToast('AI features are disabled for your account.', 'error');
+      return;
+    }
     if (selectedPages.size === 0) {
       addToast('Please select pages to generate release notes for', 'info');
       return;
@@ -4448,10 +4820,14 @@ function App() {
     } finally {
       setBatchAIGenerating(false);
     }
-  }, [selectedPages, addToast]);
+  }, [selectedPages, addToast, perms.ai]);
 
   // Send batch AI results to LaunchNotes (one draft per successful result)
   const handleBatchSendToLaunchNotes = useCallback(async () => {
+    if (!perms.launchnotes) {
+      addToast('LaunchNotes is disabled for your account.', 'error');
+      return;
+    }
     if (!batchAIResults?.results?.length) return;
     const credentials = getCredentials();
     if (!credentials?.launchnotesApiKey && !credentials?.launchnotesUseSandbox) {
@@ -4504,10 +4880,14 @@ function App() {
     } else {
       addToast('Failed to create LaunchNotes drafts', 'error');
     }
-  }, [batchAIResults, addToast]);
+  }, [batchAIResults, addToast, perms.launchnotes]);
 
   // AI Suggestions
   const handleAISuggestions = useCallback(async (page) => {
+    if (!perms.ai) {
+      addToast('AI features are disabled for your account.', 'error');
+      return;
+    }
     const credentials = getCredentials();
     if (!credentials?.aiApiKey) {
       addToast('Please configure AI API key in Settings', 'error');
@@ -4538,10 +4918,14 @@ function App() {
     } catch (err) {
       addToast(err.message || 'Failed to generate suggestions', 'error');
     }
-  }, [addToast]);
+  }, [addToast, perms.ai]);
 
   // Style Guide Compliance Check
   const handleCheckCompliance = useCallback(async (page) => {
+    if (!perms.ai) {
+      addToast('AI features are disabled for your account.', 'error');
+      return;
+    }
     // Check style guide status before checking compliance
     await checkStyleGuideStatus();
 
@@ -4562,7 +4946,7 @@ function App() {
     } catch (err) {
       addToast(err.message || 'Failed to check compliance', 'error');
     }
-  }, [addToast]);
+  }, [addToast, perms.ai]);
 
   // Sync from Confluence – re-aggregate page data (Jira ticket, assignee, comments, etc.) without creating duplicates
   const [syncingFromConfluence, setSyncingFromConfluence] = useState(false);
@@ -4733,6 +5117,27 @@ function App() {
     return () => clearInterval(interval);
   }, [checkStyleGuideStatus]);
 
+  if (adminPortal) {
+    if (!perms.loaded) {
+      return (
+        <div className="app admin-portal-loading">
+          <div className="loading-state full">
+            <div className="spinner large" />
+            <span>Loading…</span>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <AdminPortal
+        onExit={() => {
+          window.location.hash = '';
+          setAdminPortal(false);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="app">
       {showRocketCelebration && (
@@ -4822,6 +5227,29 @@ function App() {
             >
               Settings
             </button>
+            {perms.loaded && perms.isAdmin && (
+              <a
+                href="#/admin"
+                className="btn btn-secondary"
+                onClick={(e) => {
+                  e.preventDefault();
+                  window.location.hash = '#/admin';
+                }}
+                title="User invites and permissions"
+              >
+                Admin
+              </a>
+            )}
+            {isSupabaseAuthConfigured() && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => signOutApp()}
+                title="Sign out of this app (Toast login)"
+              >
+                Sign out
+              </button>
+            )}
             <ThemePicker />
           </div>
         </div>
@@ -4855,17 +5283,19 @@ function App() {
             <span className="tab-count">{myTasks.length}</span>
           )}
         </button>
-        <button
-          className={`view-tab ${currentView === 'aiHub' ? 'active' : ''}`}
-          onClick={() => {
-            setCurrentView('aiHub');
-            setSearchTerm('');
-            setAuthorFilter('');
-            setFixVersionFilter('');
-          }}
-        >
-          <span className="tab-name">AI Hub</span>
-        </button>
+        {(!perms.loaded || perms.ai) && (
+          <button
+            className={`view-tab ${currentView === 'aiHub' ? 'active' : ''}`}
+            onClick={() => {
+              setCurrentView('aiHub');
+              setSearchTerm('');
+              setAuthorFilter('');
+              setFixVersionFilter('');
+            }}
+          >
+            <span className="tab-name">AI Hub</span>
+          </button>
+        )}
       </nav>
 
       {/* Status tabs - only show in status view */}
@@ -5004,8 +5434,12 @@ function App() {
                   type="button"
                   className="export-csv-btn"
                   onClick={handleExportToCsv}
-                  disabled={sortedPages.length === 0}
-                  title="Export visible pages to CSV (import into Google Sheets via File → Import → Upload)"
+                  disabled={sortedPages.length === 0 || !perms.export}
+                  title={
+                    !perms.export
+                      ? 'Export is disabled for your account'
+                      : 'Export visible pages to CSV (import into Google Sheets via File → Import → Upload)'
+                  }
                 >
                   Export to CSV
                 </button>
@@ -5140,6 +5574,11 @@ function App() {
                         </td>
                     <td className="col-title">
                       <div className="page-title-row">
+                        {importedFromClaudePageIds.has(page.id) && (
+                          <span className="claude-imported-icon" title="Imported from Claude / Cursor rewrite">
+                            <span aria-hidden="true">✓</span>
+                          </span>
+                        )}
                         <button 
                           className="page-link-btn"
                           onClick={() => setDetailPage(page)}
@@ -5396,6 +5835,15 @@ function App() {
         />
       )}
 
+      {showExportForClaudeModal && (
+        <ExportForClaudeModal
+          statuses={statuses}
+          onClose={() => setShowExportForClaudeModal(false)}
+          onExport={handleExportForClaude}
+          exportLoading={exportForClaudeLoading}
+        />
+      )}
+
       {showSettings && (
         <SettingsModal
           onSave={handleSaveSettings}
@@ -5412,6 +5860,12 @@ function App() {
           styleGuideRefreshing={styleGuideRefreshing}
           onMasterExport={handleMasterExportToCsv}
           masterExportLoading={masterExportLoading}
+          exportStatuses={statuses}
+          onOpenExportForClaudeModal={() => { setShowSettings(false); setShowExportForClaudeModal(true); }}
+          onExportForClaude={handleExportForClaude}
+          exportForClaudeLoading={exportForClaudeLoading}
+          onImportFromClaude={handleImportFromClaude}
+          importFromClaudeLoading={importFromClaudeLoading}
         />
       )}
 

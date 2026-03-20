@@ -4,13 +4,29 @@ const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
+const archiver = require('archiver');
+const AdmZip = require('adm-zip');
+const multer = require('multer');
+const { requireSupabaseAuth } = require('./authMiddleware');
+const userProfileRoutes = require('./userProfileRoutes');
+const auditLogRoutes = require('./auditLogRoutes');
+const meRoutes = require('./meRoutes');
+const adminRoutes = require('./adminRoutes');
+const { requirePermission } = require('./permissionMiddleware');
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
+app.use('/api', requireSupabaseAuth);
+app.use('/api', userProfileRoutes);
+app.use('/api', auditLogRoutes);
+app.use('/api', meRoutes);
+app.use('/api', adminRoutes);
 
 // Page statuses configuration
 const PAGE_STATUSES = {
@@ -3853,7 +3869,7 @@ app.get('/api/style-guide/status', async (req, res) => {
 });
 
 // Endpoint to force refresh style guide
-app.post('/api/style-guide/refresh', async (req, res) => {
+app.post('/api/style-guide/refresh', requirePermission('ai'), async (req, res) => {
   try {
     const credentials = getCredentialsFromRequest(req);
     const styleGuide = await fetchStyleGuide(credentials, true);
@@ -3872,6 +3888,490 @@ app.post('/api/style-guide/refresh', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: 'Failed to refresh style guide',
+      details: error.message
+    });
+  }
+});
+
+// Shared: fetch pages for statuses and apply export filters (assignees, fixVersions, lobs, date range)
+function getAuthHeadersForExport(req, credentials) {
+  const authHeaders = {
+    'x-atlassian-email': req.headers['x-atlassian-email'] || credentials.email,
+    'x-atlassian-token': req.headers['x-atlassian-token'] || credentials.token,
+    'x-atlassian-base-url': req.headers['x-atlassian-base-url'] || credentials.baseUrl || 'https://toasttab.atlassian.net/wiki'
+  };
+  if (req.headers['x-draft-page-id']) authHeaders['x-draft-page-id'] = req.headers['x-draft-page-id'];
+  if (req.headers['x-in-progress-page-id']) authHeaders['x-in-progress-page-id'] = req.headers['x-in-progress-page-id'];
+  if (req.headers['x-needs-action-page-id']) authHeaders['x-needs-action-page-id'] = req.headers['x-needs-action-page-id'];
+  if (req.headers['x-published-page-id']) authHeaders['x-published-page-id'] = req.headers['x-published-page-id'];
+  if (req.headers['x-discard-page-id']) authHeaders['x-discard-page-id'] = req.headers['x-discard-page-id'];
+  return authHeaders;
+}
+
+async function fetchPagesForStatuses(statusKeys, req, credentials) {
+  const baseUrl = `http://127.0.0.1:${PORT}`;
+  const authHeaders = getAuthHeadersForExport(req, credentials);
+  const allPages = [];
+  for (const status of statusKeys) {
+    try {
+      const r = await axios.get(`${baseUrl}/api/pages?status=${status}`, {
+        headers: authHeaders,
+        validateStatus: () => true,
+        timeout: 120000
+      });
+      if (r.status === 200 && r.data && Array.isArray(r.data.pages)) {
+        r.data.pages.forEach(p => allPages.push({ ...p, status: p.status || status }));
+      }
+    } catch (e) {
+      console.warn(`[Export] Failed to fetch status ${status}:`, e.message);
+    }
+  }
+  return allPages;
+}
+
+function applyExportFilters(pages, filters) {
+  if (!filters) return pages;
+  let out = pages;
+  if (Array.isArray(filters.assignees) && filters.assignees.length > 0) {
+    const set = new Set(filters.assignees);
+    out = out.filter(p => {
+      const name = p.jiraAssignee?.displayName || p.referenceAssignee || '';
+      return name && set.has(name);
+    });
+  }
+  if (Array.isArray(filters.fixVersions) && filters.fixVersions.length > 0) {
+    const set = new Set(filters.fixVersions);
+    out = out.filter(p => {
+      const fv = p.fixVersions;
+      if (!fv) return false;
+      const arr = Array.isArray(fv) ? fv : [fv];
+      return arr.some(v => set.has(String(v)));
+    });
+  }
+  if (Array.isArray(filters.lobs) && filters.lobs.length > 0) {
+    const set = new Set(filters.lobs);
+    out = out.filter(p => {
+      const pill = (p.jiraMetadataPills || []).find(x => (x.label || '').toLowerCase().includes('line of business') || (x.label || '').toLowerCase().includes('product area'));
+      const vals = pill?.values || [];
+      return vals.some(v => set.has(String(v)));
+    });
+  }
+  const fromActual = filters.actualLaunchDateFrom;
+  const toActual = filters.actualLaunchDateTo;
+  if (fromActual || toActual) {
+    out = out.filter(p => {
+      const raw = p.actualLaunchDateRaw || '';
+      if (!raw) return false;
+      if (fromActual && raw < fromActual) return false;
+      if (toActual && raw > toActual) return false;
+      return true;
+    });
+  }
+  const fromTargeted = filters.targetedLaunchDateFrom;
+  const toTargeted = filters.targetedLaunchDateTo;
+  if (fromTargeted || toTargeted) {
+    out = out.filter(p => {
+      const raw = p.targetedLaunchDateRaw || '';
+      if (!raw) return false;
+      if (fromTargeted && raw < fromTargeted) return false;
+      if (toTargeted && raw > toTargeted) return false;
+      return true;
+    });
+  }
+  return out;
+}
+
+// Get filter options for Export for Claude (assignees, fix versions, LOB) for the given statuses
+app.post('/api/export-for-claude-options', requirePermission('export'), async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    if (!credentials || !credentials.email || !credentials.token) {
+      return res.status(401).json({ error: 'Atlassian credentials required' });
+    }
+    const statusesFilter = req.body.statuses;
+    const allStatusKeys = Object.keys(PAGE_STATUSES);
+    const statusKeys = Array.isArray(statusesFilter) && statusesFilter.length > 0
+      ? statusesFilter.filter(s => allStatusKeys.includes(s))
+      : allStatusKeys;
+    const pages = await fetchPagesForStatuses(statusKeys, req, credentials);
+    const assignees = [];
+    const fixVersions = new Set();
+    const lobs = new Set();
+    pages.forEach(p => {
+      const name = p.jiraAssignee?.displayName || p.referenceAssignee;
+      if (name) assignees.push(name);
+      const fv = p.fixVersions;
+      if (fv) (Array.isArray(fv) ? fv : [fv]).forEach(v => fixVersions.add(String(v)));
+      const pill = (p.jiraMetadataPills || []).find(x => (x.label || '').toLowerCase().includes('line of business') || (x.label || '').toLowerCase().includes('product area'));
+      (pill?.values || []).forEach(v => lobs.add(String(v)));
+    });
+    res.json({
+      assignees: [...new Set(assignees)].sort(),
+      fixVersions: [...fixVersions].sort(),
+      lobs: [...lobs].sort()
+    });
+  } catch (error) {
+    console.error('Export options failed:', error.message);
+    res.status(500).json({ error: 'Failed to load options', details: error.message });
+  }
+});
+
+// Preview filtered pages for Export for Claude
+app.post('/api/export-for-claude-preview', requirePermission('export'), async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    if (!credentials || !credentials.email || !credentials.token) {
+      return res.status(401).json({ error: 'Atlassian credentials required' });
+    }
+    const statusesFilter = req.body.statuses;
+    const allStatusKeys = Object.keys(PAGE_STATUSES);
+    const statusKeys = Array.isArray(statusesFilter) && statusesFilter.length > 0
+      ? statusesFilter.filter(s => allStatusKeys.includes(s))
+      : allStatusKeys;
+    const pages = await fetchPagesForStatuses(statusKeys, req, credentials);
+    const filters = {
+      assignees: req.body.assignees,
+      fixVersions: req.body.fixVersions,
+      lobs: req.body.lobs,
+      actualLaunchDateFrom: req.body.actualLaunchDateFrom,
+      actualLaunchDateTo: req.body.actualLaunchDateTo,
+      targetedLaunchDateFrom: req.body.targetedLaunchDateFrom,
+      targetedLaunchDateTo: req.body.targetedLaunchDateTo
+    };
+    const filtered = applyExportFilters(pages, filters);
+    res.json({
+      pages: filtered.map(p => ({
+        id: p.id,
+        title: p.title,
+        status: p.status,
+        assignee: p.jiraAssignee?.displayName || p.referenceAssignee,
+        fixVersions: p.fixVersions,
+        lob: (p.jiraMetadataPills || []).find(x => (x.label || '').toLowerCase().includes('line of business') || (x.label || '').toLowerCase().includes('product area'))?.values,
+        actualLaunchDate: p.actualLaunchDate,
+        targetedLaunchDate: p.targetedLaunchDate
+      }))
+    });
+  } catch (error) {
+    console.error('Export preview failed:', error.message);
+    res.status(500).json({ error: 'Failed to load preview', details: error.message });
+  }
+});
+
+// Export for Claude: produce a zip of style guide, manifest, and one file per page for use with Claude Code / Cursor
+app.post('/api/export-for-claude', requirePermission('export'), async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    if (!credentials || !credentials.email || !credentials.token) {
+      return res.status(401).json({ error: 'Atlassian credentials required' });
+    }
+
+    const statusesFilter = req.body.statuses; // optional: array of status keys to include
+    const allStatusKeys = Object.keys(PAGE_STATUSES);
+    const statusKeys = Array.isArray(statusesFilter) && statusesFilter.length > 0
+      ? statusesFilter.filter(s => allStatusKeys.includes(s))
+      : allStatusKeys;
+
+    const styleGuide = await fetchStyleGuide(credentials, false);
+    const authHeaders = getAuthHeadersForExport(req, credentials);
+    const baseUrl = `http://127.0.0.1:${PORT}`;
+
+    const allPages = await fetchPagesForStatuses(statusKeys, req, credentials);
+    const filters = {
+      assignees: req.body.assignees,
+      fixVersions: req.body.fixVersions,
+      lobs: req.body.lobs,
+      actualLaunchDateFrom: req.body.actualLaunchDateFrom,
+      actualLaunchDateTo: req.body.actualLaunchDateTo,
+      targetedLaunchDateFrom: req.body.targetedLaunchDateFrom,
+      targetedLaunchDateTo: req.body.targetedLaunchDateTo
+    };
+    const pages = applyExportFilters(allPages, filters);
+
+    const exportedAt = new Date().toISOString();
+    const manifest = {
+      exportedAt,
+      styleGuideTitle: styleGuide.title || 'Style Guide',
+      styleGuideVersion: styleGuide.version,
+      totalPages: pages.length,
+      statusFilter: statusKeys.length === allStatusKeys.length ? 'all' : statusKeys,
+      pages: pages.map(p => ({
+        id: p.id,
+        title: p.title,
+        status: p.status,
+        jiraTicket: p.jiraTicket,
+        jiraUrl: p.jiraUrl,
+        url: p.url,
+        contentPath: `pages/${p.id}.md`
+      }))
+    };
+
+    const instructions = `# Release notes export for Claude / Cursor
+
+This folder was exported from the Confluence Release Notes Manager.
+
+## Quick start (Cursor)
+
+1. **Open in Cursor** – **Mac:** Open Terminal, go to this folder (\`cd\` to the unzipped folder), and run \`bash start.sh\` (no admin or security prompt). **Windows:** Double-click **start.bat**. Or from any terminal in this folder run \`cursor .\` (install the \`cursor\` command from Cursor: Command Palette → "Shell Command: Install 'cursor' command").
+2. **Agent instructions** – Cursor will automatically load **AGENTS.md** when this folder is open. Ask the Cursor Agent to "rewrite all pages to the style guide" or "follow AGENTS.md"; it will read the style guide and \`pages/*.md\` and write rewritten notes to **drafts/*.md**.
+
+## Contents
+
+- **AGENTS.md** – Instructions for the Cursor Agent (loaded automatically when the folder is open).
+- **AGENT_COMMAND.md** – Copy-paste command to give the Agent each time (same instructions in one block).
+- **style-guide.md** – Our release note style guide. Rewrite all page content to match this guide.
+- **manifest.json** – List of pages with metadata (id, title, status, Jira link, etc.).
+- **pages/*.md** – One file per Confluence page. Each file has YAML frontmatter (metadata) and the page body as plain text.
+- **start.sh** (Mac: run \`bash start.sh\` from Terminal) / **start.bat** (Windows: double-click) – Opens Cursor with this folder so the Agent has full context.
+
+## Your task (if not using Cursor Agent)
+
+1. Read **style-guide.md** and **manifest.json**.
+2. For each file in **pages/**:
+   - If the page is a template or the body says things like "please add details" (placeholder content), **ignore it** – do not write a draft for it.
+   - Otherwise: read the frontmatter (metadata) and the body (current Confluence content), rewrite the body to meet the style guide (tone, structure, clarity), and write the improved release note to **drafts/<page-id>.md** (create the \`drafts\` folder). Use the same frontmatter and your rewritten body.
+
+## After you're done
+
+- **Import into the tool:** In the Confluence Release Notes Manager, open **Settings → Export**. Use **Choose zip to import drafts** and select a zip of this folder (containing the **drafts** folder). The tool will list the drafts and let you send them to LaunchNotes in one go.
+- Or copy content from **drafts/** manually into the tool and use its LaunchNotes flow.
+
+Exported: ${exportedAt}
+Total pages: ${pages.length}
+`;
+
+    const agentsMd = `# Release notes rewrite (for Cursor Agent)
+
+When this folder is opened in Cursor, follow these instructions.
+
+## Context
+
+- **style-guide.md** – Our release note style guide. All rewritten content must match this guide.
+- **manifest.json** – List of pages (id, title, status, Jira link, Confluence URL). Each has a corresponding file in **pages/<id>.md**.
+- **pages/*.md** – One file per Confluence page: YAML frontmatter (metadata) + plain-text body (current content).
+
+## Task
+
+1. Read **style-guide.md** and **manifest.json**.
+2. For each file in **pages/**:
+   - If the page is a template or the body says things like "please add details" (placeholder content), **ignore it** – do not write a draft for it.
+   - Otherwise: read the frontmatter and the body, rewrite the body to match the style guide (tone, structure, clarity), keep the same meaning and key facts, and write the result to **drafts/<page-id>.md** with the same frontmatter and your rewritten body. Create the \`drafts\` folder if it does not exist.
+3. Do not modify files in **pages/**; only write to **drafts/**.
+
+## Output
+
+- All rewritten release notes in **drafts/*.md**, ready for manual copy into the Confluence Release Notes Manager or a future "Import from Claude output" flow into LaunchNotes.
+`;
+
+    const agentCommandMd = `# Agent command
+
+Copy the block below and paste it into the Cursor Agent (or any compatible AI) each time you run a rewrite.
+
+\`\`\`
+Read style-guide.md and manifest.json. For every file in pages/, rewrite the body to match the style guide. Keep the same meaning and facts. Write each result to drafts/<page-id>.md with the same YAML frontmatter as the source file and your rewritten body. Create the drafts folder if it doesn't exist. If a source page is a template or says "please add details" (placeholder content), ignore it and do not write a draft for it.
+\`\`\`
+`;
+
+    const startShMac = `#!/bin/bash
+# Open this folder in Cursor (run from Terminal: bash start.sh - no admin needed).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if command -v cursor &>/dev/null; then
+  cursor "$SCRIPT_DIR"
+else
+  open -a "Cursor" "$SCRIPT_DIR"
+fi
+`;
+
+    const startBatWindows = `@echo off
+REM Open this folder in Cursor so the Agent can run the rewrite (see AGENTS.md).
+cd /d "%~dp0"
+if where cursor >nul 2>nul (
+  cursor .
+) else (
+  start "" "Cursor" "%~dp0"
+  echo If Cursor did not open, install the 'cursor' command from Cursor's Command Palette, or open Cursor and File > Open Folder > this folder.
+)
+pause
+`;
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="release-notes-for-claude-${new Date().toISOString().slice(0, 10)}.zip"`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => {
+      console.error('[Export] Archiver error:', err);
+      if (!res.headersSent) res.status(500).json({ error: 'Export archive failed' });
+    });
+    archive.pipe(res);
+
+    archive.append(JSON.stringify(manifest, null, 2), { name: 'manifest.json' });
+    archive.append(styleGuide.content || '# No style guide content', { name: 'style-guide.md' });
+    archive.append(instructions, { name: 'INSTRUCTIONS.md' });
+    archive.append(agentsMd, { name: 'AGENTS.md' });
+    archive.append(agentCommandMd, { name: 'AGENT_COMMAND.md' });
+    archive.append(startShMac, { name: 'start.sh' });
+    archive.append(startBatWindows, { name: 'start.bat' });
+
+    for (const p of pages) {
+      const assignee = p.jiraAssignee?.displayName || p.referenceAssignee || '';
+      const createdDate = p.createdDate ? new Date(p.createdDate).toISOString().split('T')[0] : '';
+      const frontmatter = `---
+id: "${String(p.id).replace(/"/g, '\\"')}"
+title: "${String(p.title || '').replace(/"/g, '\\"')}"
+status: "${String(p.status || '').replace(/"/g, '\\"')}"
+jiraTicket: "${String(p.jiraTicket || '').replace(/"/g, '\\"')}"
+jiraUrl: "${String(p.jiraUrl || '').replace(/"/g, '\\"')}"
+confluenceUrl: "${String(p.url || '').replace(/"/g, '\\"')}"
+assignee: "${String(assignee).replace(/"/g, '\\"')}"
+createdDate: "${createdDate}"
+targetedLaunchDate: "${String(p.targetedLaunchDate || '').replace(/"/g, '\\"')}"
+actualLaunchDate: "${String(p.actualLaunchDate || '').replace(/"/g, '\\"')}"
+educationProjectStatus: "${String(p.educationProjectStatus || '').replace(/"/g, '\\"')}"
+---
+
+`;
+      const body = (p.contentText || '').replace(/\r\n/g, '\n').trim();
+      archive.append(Buffer.from(frontmatter + body, 'utf8'), { name: `pages/${p.id}.md` });
+    }
+
+    await archive.finalize();
+  } catch (error) {
+    console.error('Export for Claude failed:', error.response?.data || error.message);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Export failed',
+        details: error.message
+      });
+    }
+  }
+});
+
+// Parse frontmatter and body from a markdown string (--- ... --- then body)
+function parseDraftMarkdown(raw) {
+  const trimmed = (raw || '').trim();
+  const dashMatch = trimmed.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
+  if (!dashMatch) return { frontmatter: {}, body: trimmed };
+  const frontmatterRaw = dashMatch[1];
+  const body = (dashMatch[2] || '').trim();
+  const frontmatter = {};
+  frontmatterRaw.split(/\r?\n/).forEach(line => {
+    const m = line.match(/^([a-zA-Z0-9_]+):\s*"((?:[^"\\]|\\.)*)"\s*$/);
+    if (m) frontmatter[m[1]] = m[2].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  });
+  return { frontmatter, body };
+}
+
+// Import from Claude output: upload a zip containing drafts/*.md (or any .md), get back list of drafts for LaunchNotes
+app.post('/api/import-from-claude', requirePermission('export'), upload.single('zip'), async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'No file uploaded', details: 'Send a zip file in field "zip".' });
+    }
+    const zip = new AdmZip(req.file.buffer);
+    const entries = zip.getEntries();
+    const drafts = [];
+    for (const entry of entries) {
+      if (entry.isDirectory) continue;
+      const name = (entry.entryName || '').replace(/\\/g, '/');
+      if (!name.endsWith('.md')) continue;
+      if (!name.includes('drafts/')) continue;
+      const basename = name.replace(/.*\//, '');
+      if (basename.startsWith('._')) continue;
+      const raw = entry.getData().toString('utf8');
+      const { frontmatter, body } = parseDraftMarkdown(raw);
+      const id = frontmatter.id || name.replace(/.*\//, '').replace(/\.md$/, '');
+      drafts.push({
+        id,
+        title: frontmatter.title || id,
+        jiraTicket: frontmatter.jiraTicket || null,
+        jiraUrl: frontmatter.jiraUrl || null,
+        confluenceUrl: frontmatter.confluenceUrl || null,
+        content: body
+      });
+    }
+    res.json({ success: true, drafts });
+  } catch (error) {
+    console.error('Import from Claude failed:', error.message);
+    res.status(500).json({
+      error: 'Import failed',
+      details: error.message
+    });
+  }
+});
+
+// Prepend rewritten (imported) content to Confluence pages – markdown at top, then separator, then existing body
+app.post('/api/pages/prepend-imported-content', async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi } = createApiClients(credentials);
+    const updates = Array.isArray(req.body.updates) ? req.body.updates : [];
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'Body must include updates: [{ pageId, content }]' });
+    }
+    const success = [];
+    const failed = [];
+    for (const { pageId, content } of updates) {
+      if (!pageId || content == null) {
+        failed.push({ pageId: pageId || null, error: 'Missing pageId or content' });
+        continue;
+      }
+      try {
+        const getRes = await confluenceApi.get(`/rest/api/content/${pageId}`, {
+          params: { expand: 'version,body.storage,ancestors' }
+        });
+        const page = getRes.data;
+        const currentVersion = page.version?.number;
+        const existingBody = page.body?.storage?.value || '';
+        const ancestors = Array.isArray(page.ancestors) && page.ancestors.length > 0
+          ? page.ancestors.map(a => ({ id: a.id }))
+          : [];
+        if (currentVersion == null) {
+          failed.push({ pageId, error: 'Could not read page version' });
+          continue;
+        }
+        const cdataContent = String(content).replace(/\]\]>/g, ']]]]><![CDATA[>');
+        const markdownBlock =
+          '<ac:structured-macro ac:name="markdown"><ac:plain-text-body><![CDATA[' + cdataContent + ']]></ac:plain-text-body></ac:structured-macro>' +
+          '<p><hr/></p>';
+        const codeBlock =
+          '<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">markdown</ac:parameter><ac:plain-text-body><![CDATA[' + cdataContent + ']]></ac:plain-text-body></ac:structured-macro>' +
+          '<p><hr/></p>';
+        let newBodyValue = markdownBlock + existingBody;
+        const putPayload = {
+          id: pageId,
+          type: 'page',
+          title: page.title,
+          version: { number: currentVersion + 1 },
+          body: {
+            storage: {
+              value: newBodyValue,
+              representation: 'storage'
+            }
+          }
+        };
+        if (ancestors.length > 0) putPayload.ancestors = ancestors;
+        try {
+          await confluenceApi.put(`/rest/api/content/${pageId}`, putPayload);
+        } catch (macroErr) {
+          const errMsg = (macroErr.response?.data?.message || macroErr.message || '').toLowerCase();
+          if (errMsg.includes('macro') || errMsg.includes('storage') || macroErr.response?.status === 400) {
+            newBodyValue = codeBlock + existingBody;
+            putPayload.body.storage.value = newBodyValue;
+            await confluenceApi.put(`/rest/api/content/${pageId}`, putPayload);
+          } else {
+            throw macroErr;
+          }
+        }
+        success.push({ pageId, title: page.title });
+      } catch (err) {
+        const msg = err.response?.data?.message || err.message || 'Unknown error';
+        failed.push({ pageId, error: msg });
+      }
+    }
+    res.json({ success, failed });
+  } catch (error) {
+    console.error('Prepend imported content failed:', error.message);
+    res.status(500).json({
+      error: 'Update failed',
       details: error.message
     });
   }
@@ -4007,7 +4507,7 @@ function cleanGeneratedReleaseNote(content, headline) {
 }
 
 // Single AI Generation - Generate release note for one or more pages or custom content
-app.post('/api/ai/generate-release-note', async (req, res) => {
+app.post('/api/ai/generate-release-note', requirePermission('ai'), async (req, res) => {
   try {
     const { pageIds = [], customContent, headline } = req.body;
     
@@ -4235,7 +4735,7 @@ app.post('/api/ai/generate-release-note', async (req, res) => {
 });
 
 // Batch AI Generation - Generate release notes for multiple pages
-app.post('/api/ai/batch-generate', async (req, res) => {
+app.post('/api/ai/batch-generate', requirePermission('ai'), async (req, res) => {
   try {
     const { pageIds, options = {} } = req.body;
     
@@ -4432,7 +4932,7 @@ app.post('/api/ai/batch-generate', async (req, res) => {
 });
 
 // AI-powered suggestions for improving existing release notes
-app.post('/api/ai/suggest-improvements', async (req, res) => {
+app.post('/api/ai/suggest-improvements', requirePermission('ai'), async (req, res) => {
   try {
     const { pageId, content } = req.body;
     
@@ -4550,7 +5050,7 @@ app.post('/api/ai/suggest-improvements', async (req, res) => {
 });
 
 // Style guide compliance checker
-app.post('/api/ai/check-compliance', async (req, res) => {
+app.post('/api/ai/check-compliance', requirePermission('ai'), async (req, res) => {
   try {
     const { pageId, content } = req.body;
     
@@ -4675,7 +5175,7 @@ app.post('/api/ai/check-compliance', async (req, res) => {
 });
 
 // Create LaunchNotes draft from Confluence page
-app.post('/api/launchnotes/create-draft', async (req, res) => {
+app.post('/api/launchnotes/create-draft', requirePermission('launchnotes'), async (req, res) => {
   try {
     const { pageId, content, title, selectedSections, externalContentLinks: bodyExternalLinks, jiraTicket: bodyJiraTicket } = req.body;
     const credentials = getCredentialsFromRequest(req);
