@@ -1158,7 +1158,26 @@ const LaunchNotesImportModal = ({ pages, onConfirm, onCancel, loading: externalL
         if (!data.success) {
           throw new Error(data.error || data.details || 'Failed to create LaunchNotes draft');
         }
-        results.push({ pageId: page.id, success: true, page });
+        let movedToInProgress = false;
+        let moveError = null;
+        if (page.status === 'draft' && page.id) {
+          try {
+            const moveRes = await authenticatedFetch(`/api/pages/${page.id}/move`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ targetStatus: 'inProgress' })
+            });
+            if (!moveRes.ok) {
+              const errBody = await moveRes.json().catch(() => ({}));
+              moveError = errBody.details || errBody.error || 'Failed to move page to In Progress';
+            } else {
+              movedToInProgress = true;
+            }
+          } catch (moveErr) {
+            moveError = moveErr.message || 'Failed to move page to In Progress';
+          }
+        }
+        results.push({ pageId: page.id, success: true, page, movedToInProgress, moveError });
       } catch (err) {
         console.error(`Failed to create LaunchNotes draft for page ${page.id}:`, err);
         const errorMessage = err.response?.json ? (await err.response.json()).error || err.message : err.message;
@@ -1199,6 +1218,8 @@ const LaunchNotesImportModal = ({ pages, onConfirm, onCancel, loading: externalL
               {pages[0]?.content != null && pages[0].content !== ''
                 ? 'The rewritten content from each draft will be sent to LaunchNotes as a draft announcement (with Jira link when available).'
                 : 'The page content will be converted to Markdown format and sent to LaunchNotes as a draft announcement.'}
+              {' '}
+              Pages still in <strong>Draft</strong> are moved to <strong>In Progress</strong> in Confluence after each successful LaunchNotes create.
             </div>
           </div>
           <div className="modal-actions">
@@ -4790,14 +4811,24 @@ function App() {
       if (successCount > 0) {
         logActivity('launchnotes', `Created ${successCount} draft(s) in LaunchNotes`, { count: successCount });
       }
-      if (failCount === 0) {
+      const moveFailCount = results.filter(r => r.success && r.moveError).length;
+      if (failCount === 0 && moveFailCount === 0) {
         addToast(`Successfully created ${successCount} draft${successCount !== 1 ? 's' : ''} in LaunchNotes`, 'success');
+      } else if (failCount === 0 && moveFailCount > 0) {
+        addToast(
+          `Created ${successCount} draft${successCount !== 1 ? 's' : ''} in LaunchNotes; ${moveFailCount} could not be moved to In Progress.`,
+          'warning'
+        );
       } else {
         addToast(`Created ${successCount} draft${successCount !== 1 ? 's' : ''}, ${failCount} failed`, 'error');
       }
     }
+    if (successCount > 0) {
+      fetchPages();
+      fetchStats();
+    }
     setLaunchnotesImportAction(null);
-  }, [addToast, authenticatedFetch]);
+  }, [addToast, authenticatedFetch, fetchPages, fetchStats]);
 
   // Batch AI Generation
   const handleBatchAIGenerate = useCallback(async () => {
@@ -5890,15 +5921,6 @@ function App() {
           onCancel={() => setBulkEditAction(null)}
           loading={actionLoading}
           onAssignToMe={assignPageToMe}
-        />
-      )}
-
-      {launchnotesImportAction && (
-        <LaunchNotesImportModal
-          pages={launchnotesImportAction.pages}
-          onConfirm={handleLaunchNotesImportComplete}
-          onCancel={() => setLaunchnotesImportAction(null)}
-          loading={actionLoading}
         />
       )}
 

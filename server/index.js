@@ -3920,6 +3920,11 @@ function getAuthHeadersForExport(req, credentials) {
     'x-atlassian-token': req.headers['x-atlassian-token'] || credentials.token,
     'x-atlassian-base-url': req.headers['x-atlassian-base-url'] || credentials.baseUrl || 'https://toasttab.atlassian.net/wiki'
   };
+  // Loopback calls to /api/pages must include the user's Supabase session when auth is enabled.
+  const bearer = req.headers.authorization;
+  if (bearer) {
+    authHeaders.authorization = bearer;
+  }
   if (req.headers['x-draft-page-id']) authHeaders['x-draft-page-id'] = req.headers['x-draft-page-id'];
   if (req.headers['x-in-progress-page-id']) authHeaders['x-in-progress-page-id'] = req.headers['x-in-progress-page-id'];
   if (req.headers['x-needs-action-page-id']) authHeaders['x-needs-action-page-id'] = req.headers['x-needs-action-page-id'];
