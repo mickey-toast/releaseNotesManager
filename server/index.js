@@ -644,192 +644,203 @@ app.get('/api/pages/all', async (req, res) => {
   }
 });
 
+/**
+ * List release-note pages under a status parent (same payload as GET /api/pages).
+ * options.globalFieldNames — if set, skips getJiraFieldNames (used when export loads multiple statuses).
+ */
+async function listPagesForStatus(req, status, options = {}) {
+  const credentials = getCredentialsFromRequest(req);
+  const { confluenceApi, jiraApi } = createApiClients(credentials);
+
+  if (!PAGE_STATUSES[status]) {
+    const err = new Error('Invalid status');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const pageIdMap = {
+    draft: req.headers['x-draft-page-id'] || PAGE_STATUSES.draft.pageId,
+    inProgress: req.headers['x-in-progress-page-id'] || PAGE_STATUSES.inProgress.pageId,
+    needsAction: req.headers['x-needs-action-page-id'] || PAGE_STATUSES.needsAction.pageId,
+    published: req.headers['x-published-page-id'] || PAGE_STATUSES.published.pageId,
+    discard: req.headers['x-discard-page-id'] || PAGE_STATUSES.discard.pageId
+  };
+
+  const statusConfig = { ...PAGE_STATUSES[status], pageId: pageIdMap[status] };
+  const parentPageId = statusConfig.pageId;
+
+  const PAGE_LIMIT = 100;
+  const allRawPages = [];
+  let start = 0;
+  let hasMore = true;
+  while (hasMore) {
+    const response = await confluenceApi.get(`/rest/api/content/${parentPageId}/child/page`, {
+      params: {
+        expand: 'version,history,metadata.labels,body.storage',
+        limit: PAGE_LIMIT,
+        start
+      }
+    });
+    const results = response.data.results || [];
+    allRawPages.push(...results);
+    hasMore = results.length === PAGE_LIMIT;
+    start += results.length;
+  }
+
+  const globalFieldNames =
+    options.globalFieldNames !== undefined
+      ? options.globalFieldNames
+      : await getJiraFieldNames(jiraApi);
+
+  const pages = await Promise.all(allRawPages.map(async (page) => {
+    const bodyContent = page.body?.storage?.value || '';
+    const jiraTicket = extractJiraTicket(bodyContent) || extractJiraTicketFromTitle(page.title);
+    const referenceAssignee = extractReferenceAssignee(bodyContent);
+
+    let jiraAssignee = null;
+    let jiraMetadataPills = [];
+    let launchDatesForPage = null;
+    let targetedLaunchDateForPage = null;
+    let actualLaunchDateForPage = null;
+    let targetedLaunchDateRawForPage = null;
+    let actualLaunchDateRawForPage = null;
+    let educationProjectStatusForPage = null;
+    if (jiraTicket) {
+      try {
+        let jiraResponse = await jiraApi.get(`/rest/api/3/issue/${jiraTicket}`, {
+          params: { expand: 'names' }
+        });
+        if (!jiraResponse.data?.fields) {
+          jiraResponse = await jiraApi.get(`/rest/api/3/issue/${jiraTicket}`);
+        }
+        const issue = jiraResponse.data;
+        const fields = issue?.fields;
+        const fieldNames = issue?.names || {};
+        if (fields) {
+          const assignee = fields.assignee;
+          if (assignee) {
+            jiraAssignee = {
+              displayName: assignee.displayName,
+              email: assignee.emailAddress,
+              avatarUrl: assignee.avatarUrls?.['48x48'] || assignee.avatarUrls?.['24x24']
+            };
+          }
+          jiraMetadataPills = extractJiraMetadataPills(fields, fieldNames, globalFieldNames);
+          const extracted = extractLaunchDatesAndEducationStatus(fields, fieldNames, globalFieldNames);
+          launchDatesForPage = extracted.launchDates;
+          targetedLaunchDateForPage = extracted.targetedLaunchDate;
+          actualLaunchDateForPage = extracted.actualLaunchDate;
+          targetedLaunchDateRawForPage = extracted.targetedLaunchDateRaw;
+          actualLaunchDateRawForPage = extracted.actualLaunchDateRaw;
+          educationProjectStatusForPage = extracted.educationProjectStatus;
+        }
+      } catch (e) {
+        const httpStatus = e.response?.status;
+        if (httpStatus === 404) {
+          // Bad or inaccessible key (e.g. typo, wrong site) — skip enrichment, no stack noise
+        } else if (e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT') {
+          console.warn(`[Jira] Transient error for ${jiraTicket}:`, e.message);
+        } else {
+          console.warn(`[Jira] Could not fetch issue ${jiraTicket}:`, e.message);
+        }
+      }
+    }
+    const fixVersions = (jiraMetadataPills.find(p => p.label === 'Fix Version')?.values) || null;
+
+    let lastComment = null;
+    let commentCount = 0;
+
+    try {
+      const commentsResponse = await confluenceApi.get(`/rest/api/content/${page.id}/child/comment`, {
+        params: {
+          expand: 'version,history',
+          limit: 1,
+          order: 'desc'
+        }
+      });
+
+      commentCount = commentsResponse.data.size || 0;
+      if (commentsResponse.data.results && commentsResponse.data.results.length > 0) {
+        const comment = commentsResponse.data.results[0];
+        lastComment = {
+          id: comment.id,
+          date: comment.version?.when || comment.history?.createdDate,
+          author: comment.version?.by?.displayName || comment.history?.createdBy?.displayName
+        };
+      }
+    } catch (e) {
+      // Silently fail for comments
+    }
+
+    const createdDate = page.history?.createdDate;
+    const lastModified = page.version?.when;
+
+    let lastActivityDate = lastModified;
+    if (lastComment && lastComment.date) {
+      const commentDate = new Date(lastComment.date);
+      const modifiedDate = new Date(lastModified);
+      if (commentDate > modifiedDate) {
+        lastActivityDate = lastComment.date;
+      }
+    }
+
+    return {
+      id: page.id,
+      title: page.title,
+      url: `${credentials.baseUrl}${page._links.webui}`,
+      status,
+      createdDate,
+      createdDaysAgo: daysAgo(createdDate),
+      lastModified,
+      lastModifiedDaysAgo: daysAgo(lastModified),
+      lastActivityDate,
+      lastActivityDaysAgo: daysAgo(lastActivityDate),
+      lastComment,
+      lastCommentDaysAgo: lastComment ? daysAgo(lastComment.date) : null,
+      commentCount,
+      version: page.version?.number,
+      author: page.history?.createdBy?.displayName,
+      labels: page.metadata?.labels?.results?.map(l => l.name) || [],
+      isStale: statusConfig.staleThreshold
+        ? daysAgo(lastActivityDate) >= statusConfig.staleThreshold
+        : false,
+      jiraTicket: jiraTicket,
+      jiraUrl: jiraTicket ? `https://toasttab.atlassian.net/browse/${jiraTicket}` : null,
+      jiraAssignee: jiraAssignee,
+      referenceAssignee: referenceAssignee,
+      fixVersions: fixVersions,
+      jiraMetadataPills: jiraMetadataPills,
+      launchDates: launchDatesForPage,
+      targetedLaunchDate: targetedLaunchDateForPage,
+      actualLaunchDate: actualLaunchDateForPage,
+      targetedLaunchDateRaw: targetedLaunchDateRawForPage,
+      actualLaunchDateRaw: actualLaunchDateRawForPage,
+      educationProjectStatus: educationProjectStatusForPage,
+      contentText: convertConfluenceToText(bodyContent)
+    };
+  }));
+
+  pages.sort((a, b) => b.lastActivityDaysAgo - a.lastActivityDaysAgo);
+
+  return {
+    pages,
+    total: pages.length,
+    status,
+    statusConfig
+  };
+}
+
 // Get child pages of a specific status/parent page
 app.get('/api/pages', async (req, res) => {
   try {
-    const credentials = getCredentialsFromRequest(req);
-    const { confluenceApi, jiraApi } = createApiClients(credentials);
-    
     const status = req.query.status || 'draft';
-    
-    // Get page ID from headers or use default
-    const pageIdMap = {
-      draft: req.headers['x-draft-page-id'] || PAGE_STATUSES.draft.pageId,
-      inProgress: req.headers['x-in-progress-page-id'] || PAGE_STATUSES.inProgress.pageId,
-      needsAction: req.headers['x-needs-action-page-id'] || PAGE_STATUSES.needsAction.pageId,
-      published: req.headers['x-published-page-id'] || PAGE_STATUSES.published.pageId,
-      discard: req.headers['x-discard-page-id'] || PAGE_STATUSES.discard.pageId
-    };
-    
-    const statusConfig = { ...PAGE_STATUSES[status], pageId: pageIdMap[status] };
-    
-    if (!statusConfig) {
-      return res.status(400).json({ error: 'Invalid status' });
-    }
-
-    const parentPageId = statusConfig.pageId;
-
-    // Paginate to fetch all child pages (Confluence API returns max 100 per request)
-    const PAGE_LIMIT = 100;
-    const allRawPages = [];
-    let start = 0;
-    let hasMore = true;
-    while (hasMore) {
-      const response = await confluenceApi.get(`/rest/api/content/${parentPageId}/child/page`, {
-        params: {
-          expand: 'version,history,metadata.labels,body.storage',
-          limit: PAGE_LIMIT,
-          start
-        }
-      });
-      const results = response.data.results || [];
-      allRawPages.push(...results);
-      hasMore = results.length === PAGE_LIMIT;
-      start += results.length;
-    }
-
-    const globalFieldNames = await getJiraFieldNames(jiraApi);
-
-    const pages = await Promise.all(allRawPages.map(async (page) => {
-      // Extract Jira ticket from page body, then fallback to page title (e.g. "FN1-699: ...")
-      const bodyContent = page.body?.storage?.value || '';
-      const jiraTicket = extractJiraTicket(bodyContent) || extractJiraTicketFromTitle(page.title);
-      const referenceAssignee = extractReferenceAssignee(bodyContent);
-      
-      let jiraAssignee = null;
-      let jiraMetadataPills = [];
-      let launchDatesForPage = null;
-      let targetedLaunchDateForPage = null;
-      let actualLaunchDateForPage = null;
-      let targetedLaunchDateRawForPage = null;
-      let actualLaunchDateRawForPage = null;
-      let educationProjectStatusForPage = null;
-      if (jiraTicket) {
-        try {
-          let jiraResponse;
-          try {
-            jiraResponse = await jiraApi.get(`/rest/api/3/issue/${jiraTicket}`, {
-              params: { expand: 'names' }
-            });
-            if (!jiraResponse.data?.fields) {
-              jiraResponse = await jiraApi.get(`/rest/api/3/issue/${jiraTicket}`);
-            }
-          } catch (error) {
-            console.error(`[Jira] Error fetching issue ${jiraTicket}:`, error.message);
-            throw error;
-          }
-          const issue = jiraResponse.data;
-          const fields = issue?.fields;
-          const fieldNames = issue?.names || {};
-          if (fields) {
-            const assignee = fields.assignee;
-            if (assignee) {
-              jiraAssignee = {
-                displayName: assignee.displayName,
-                email: assignee.emailAddress,
-                avatarUrl: assignee.avatarUrls?.['48x48'] || assignee.avatarUrls?.['24x24']
-              };
-            }
-            jiraMetadataPills = extractJiraMetadataPills(fields, fieldNames, globalFieldNames);
-            const extracted = extractLaunchDatesAndEducationStatus(fields, fieldNames, globalFieldNames);
-            launchDatesForPage = extracted.launchDates;
-            targetedLaunchDateForPage = extracted.targetedLaunchDate;
-            actualLaunchDateForPage = extracted.actualLaunchDate;
-            targetedLaunchDateRawForPage = extracted.targetedLaunchDateRaw;
-            actualLaunchDateRawForPage = extracted.actualLaunchDateRaw;
-            educationProjectStatusForPage = extracted.educationProjectStatus;
-          }
-        } catch (e) {
-          console.log(`Could not fetch Jira data for ${jiraTicket}:`, e.message);
-        }
-      }
-      const fixVersions = (jiraMetadataPills.find(p => p.label === 'Fix Version')?.values) || null;
-
-      // Get the last comment for each page
-      let lastComment = null;
-      let commentCount = 0;
-      
-      try {
-        const commentsResponse = await confluenceApi.get(`/rest/api/content/${page.id}/child/comment`, {
-          params: {
-            expand: 'version,history',
-            limit: 1,
-            order: 'desc'
-          }
-        });
-        
-        commentCount = commentsResponse.data.size || 0;
-        if (commentsResponse.data.results && commentsResponse.data.results.length > 0) {
-          const comment = commentsResponse.data.results[0];
-          lastComment = {
-            id: comment.id,
-            date: comment.version?.when || comment.history?.createdDate,
-            author: comment.version?.by?.displayName || comment.history?.createdBy?.displayName
-          };
-        }
-      } catch (e) {
-        // Silently fail for comments
-      }
-
-      const createdDate = page.history?.createdDate;
-      const lastModified = page.version?.when;
-      
-      // Determine the last activity date
-      let lastActivityDate = lastModified;
-      if (lastComment && lastComment.date) {
-        const commentDate = new Date(lastComment.date);
-        const modifiedDate = new Date(lastModified);
-        if (commentDate > modifiedDate) {
-          lastActivityDate = lastComment.date;
-        }
-      }
-
-      return {
-        id: page.id,
-        title: page.title,
-        url: `${credentials.baseUrl}${page._links.webui}`,
-        status,
-        createdDate,
-        createdDaysAgo: daysAgo(createdDate),
-        lastModified,
-        lastModifiedDaysAgo: daysAgo(lastModified),
-        lastActivityDate,
-        lastActivityDaysAgo: daysAgo(lastActivityDate),
-        lastComment,
-        lastCommentDaysAgo: lastComment ? daysAgo(lastComment.date) : null,
-        commentCount,
-        version: page.version?.number,
-        author: page.history?.createdBy?.displayName,
-        labels: page.metadata?.labels?.results?.map(l => l.name) || [],
-        isStale: statusConfig.staleThreshold 
-          ? daysAgo(lastActivityDate) >= statusConfig.staleThreshold 
-          : false,
-        jiraTicket: jiraTicket,
-        jiraUrl: jiraTicket ? `https://toasttab.atlassian.net/browse/${jiraTicket}` : null,
-        jiraAssignee: jiraAssignee,
-        referenceAssignee: referenceAssignee,
-        fixVersions: fixVersions,
-        jiraMetadataPills: jiraMetadataPills,
-        launchDates: launchDatesForPage,
-        targetedLaunchDate: targetedLaunchDateForPage,
-        actualLaunchDate: actualLaunchDateForPage,
-        targetedLaunchDateRaw: targetedLaunchDateRawForPage,
-        actualLaunchDateRaw: actualLaunchDateRawForPage,
-        educationProjectStatus: educationProjectStatusForPage,
-        contentText: convertConfluenceToText(bodyContent)
-      };
-    }));
-
-    // Sort by last activity (oldest first)
-    pages.sort((a, b) => b.lastActivityDaysAgo - a.lastActivityDaysAgo);
-
-    res.json({
-      pages,
-      total: pages.length,
-      status,
-      statusConfig
-    });
+    const payload = await listPagesForStatus(req, status);
+    res.json(payload);
   } catch (error) {
+    const code = error.statusCode || error.response?.status;
+    if (code === 400) {
+      return res.status(400).json({ error: 'Invalid status', details: error.message });
+    }
     console.error('Error fetching pages:', error.response?.data || error.message);
     res.status(error.response?.status || 500).json({
       error: 'Failed to fetch pages',
@@ -3914,38 +3925,15 @@ app.post('/api/style-guide/refresh', requirePermission('ai'), async (req, res) =
 });
 
 // Shared: fetch pages for statuses and apply export filters (assignees, fixVersions, lobs, date range)
-function getAuthHeadersForExport(req, credentials) {
-  const authHeaders = {
-    'x-atlassian-email': req.headers['x-atlassian-email'] || credentials.email,
-    'x-atlassian-token': req.headers['x-atlassian-token'] || credentials.token,
-    'x-atlassian-base-url': req.headers['x-atlassian-base-url'] || credentials.baseUrl || 'https://toasttab.atlassian.net/wiki'
-  };
-  // Loopback calls to /api/pages must include the user's Supabase session when auth is enabled.
-  const bearer = req.headers.authorization;
-  if (bearer) {
-    authHeaders.authorization = bearer;
-  }
-  if (req.headers['x-draft-page-id']) authHeaders['x-draft-page-id'] = req.headers['x-draft-page-id'];
-  if (req.headers['x-in-progress-page-id']) authHeaders['x-in-progress-page-id'] = req.headers['x-in-progress-page-id'];
-  if (req.headers['x-needs-action-page-id']) authHeaders['x-needs-action-page-id'] = req.headers['x-needs-action-page-id'];
-  if (req.headers['x-published-page-id']) authHeaders['x-published-page-id'] = req.headers['x-published-page-id'];
-  if (req.headers['x-discard-page-id']) authHeaders['x-discard-page-id'] = req.headers['x-discard-page-id'];
-  return authHeaders;
-}
-
 async function fetchPagesForStatuses(statusKeys, req, credentials) {
-  const baseUrl = `http://127.0.0.1:${PORT}`;
-  const authHeaders = getAuthHeadersForExport(req, credentials);
+  const { jiraApi } = createApiClients(credentials);
+  const globalFieldNames = await getJiraFieldNames(jiraApi);
   const allPages = [];
   for (const status of statusKeys) {
     try {
-      const r = await axios.get(`${baseUrl}/api/pages?status=${status}`, {
-        headers: authHeaders,
-        validateStatus: () => true,
-        timeout: 120000
-      });
-      if (r.status === 200 && r.data && Array.isArray(r.data.pages)) {
-        r.data.pages.forEach(p => allPages.push({ ...p, status: p.status || status }));
+      const { pages } = await listPagesForStatus(req, status, { globalFieldNames });
+      for (const p of pages) {
+        allPages.push({ ...p, status: p.status || status });
       }
     } catch (e) {
       console.warn(`[Export] Failed to fetch status ${status}:`, e.message);
@@ -4097,8 +4085,6 @@ app.post('/api/export-for-claude', requirePermission('export'), async (req, res)
       : allStatusKeys;
 
     const styleGuide = await fetchStyleGuide(credentials, false);
-    const authHeaders = getAuthHeadersForExport(req, credentials);
-    const baseUrl = `http://127.0.0.1:${PORT}`;
 
     const allPages = await fetchPagesForStatuses(statusKeys, req, credentials);
     const filters = {
@@ -4110,7 +4096,26 @@ app.post('/api/export-for-claude', requirePermission('export'), async (req, res)
       targetedLaunchDateFrom: req.body.targetedLaunchDateFrom,
       targetedLaunchDateTo: req.body.targetedLaunchDateTo
     };
-    const pages = applyExportFilters(allPages, filters);
+
+    const previewPageIds = Array.isArray(req.body.previewPageIds)
+      ? req.body.previewPageIds.map(String).filter(Boolean)
+      : [];
+
+    let pages;
+    if (previewPageIds.length > 0) {
+      const byId = new Map(allPages.map(p => [String(p.id), p]));
+      const ordered = [];
+      const seen = new Set();
+      for (const id of previewPageIds) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const p = byId.get(id);
+        if (p) ordered.push(p);
+      }
+      pages = ordered;
+    } else {
+      pages = applyExportFilters(allPages, filters);
+    }
 
     const exportedAt = new Date().toISOString();
     const manifest = {

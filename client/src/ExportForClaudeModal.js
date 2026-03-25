@@ -1,18 +1,122 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { authenticatedFetch } from './api';
+
+/** Mirrors server applyExportFilters for client-side preview when using cached board pages. */
+function applyExportFiltersClient(pages, filters) {
+  if (!filters) return pages;
+  let out = pages;
+  if (Array.isArray(filters.assignees) && filters.assignees.length > 0) {
+    const set = new Set(filters.assignees);
+    out = out.filter(p => {
+      const name = p.jiraAssignee?.displayName || p.referenceAssignee || '';
+      return name && set.has(name);
+    });
+  }
+  if (Array.isArray(filters.fixVersions) && filters.fixVersions.length > 0) {
+    const set = new Set(filters.fixVersions);
+    out = out.filter(p => {
+      const fv = p.fixVersions;
+      if (!fv) return false;
+      const arr = Array.isArray(fv) ? fv : [fv];
+      return arr.some(v => set.has(String(v)));
+    });
+  }
+  if (Array.isArray(filters.lobs) && filters.lobs.length > 0) {
+    const set = new Set(filters.lobs);
+    out = out.filter(p => {
+      const pill = (p.jiraMetadataPills || []).find(
+        x =>
+          (x.label || '').toLowerCase().includes('line of business') ||
+          (x.label || '').toLowerCase().includes('product area')
+      );
+      const vals = pill?.values || [];
+      return vals.some(v => set.has(String(v)));
+    });
+  }
+  const fromActual = filters.actualLaunchDateFrom;
+  const toActual = filters.actualLaunchDateTo;
+  if (fromActual || toActual) {
+    out = out.filter(p => {
+      const raw = p.actualLaunchDateRaw || '';
+      if (!raw) return false;
+      if (fromActual && raw < fromActual) return false;
+      if (toActual && raw > toActual) return false;
+      return true;
+    });
+  }
+  const fromTargeted = filters.targetedLaunchDateFrom;
+  const toTargeted = filters.targetedLaunchDateTo;
+  if (fromTargeted || toTargeted) {
+    out = out.filter(p => {
+      const raw = p.targetedLaunchDateRaw || '';
+      if (!raw) return false;
+      if (fromTargeted && raw < fromTargeted) return false;
+      if (toTargeted && raw > toTargeted) return false;
+      return true;
+    });
+  }
+  return out;
+}
+
+function buildExportOptionsFromPages(pages) {
+  const assignees = [];
+  const fixVersions = new Set();
+  const lobs = new Set();
+  (pages || []).forEach(p => {
+    const name = p.jiraAssignee?.displayName || p.referenceAssignee;
+    if (name) assignees.push(name);
+    const fv = p.fixVersions;
+    if (fv) (Array.isArray(fv) ? fv : [fv]).forEach(v => fixVersions.add(String(v)));
+    const pill = (p.jiraMetadataPills || []).find(
+      x =>
+        (x.label || '').toLowerCase().includes('line of business') ||
+        (x.label || '').toLowerCase().includes('product area')
+    );
+    (pill?.values || []).forEach(v => lobs.add(String(v)));
+  });
+  return {
+    assignees: [...new Set(assignees)].sort(),
+    fixVersions: [...fixVersions].sort(),
+    lobs: [...lobs].sort()
+  };
+}
+
+function toPreviewRow(p) {
+  const pill = (p.jiraMetadataPills || []).find(
+    x =>
+      (x.label || '').toLowerCase().includes('line of business') ||
+      (x.label || '').toLowerCase().includes('product area')
+  );
+  return {
+    id: p.id,
+    title: p.title,
+    status: p.status,
+    assignee: p.jiraAssignee?.displayName || p.referenceAssignee,
+    fixVersions: p.fixVersions,
+    lob: pill?.values,
+    actualLaunchDate: p.actualLaunchDate,
+    targetedLaunchDate: p.targetedLaunchDate
+  };
+}
 
 const ExportForClaudeModal = ({
   statuses = {},
+  /** Pages already loaded for the active board column (same shape as GET /api/pages). */
+  cachedPages = null,
+  /** Status key for that column, e.g. 'draft'. */
+  cachedStatus = null,
   onClose,
   onExport,
   exportLoading = false
 }) => {
   const statusKeys = Object.keys(statuses);
-  const [statusesSelected, setStatusesSelected] = useState(() => []);
+  const [statusesSelected, setStatusesSelected] = useState(() =>
+    cachedStatus ? [cachedStatus] : []
+  );
   const [assigneesSelected, setAssigneesSelected] = useState([]);
   const [fixVersionsSelected, setFixVersionsSelected] = useState([]);
   const [lobsSelected, setLobsSelected] = useState([]);
-  const [dateFilterType, setDateFilterType] = useState('none'); // 'none' | 'actual' | 'targeted'
+  const [dateFilterType, setDateFilterType] = useState('none');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [options, setOptions] = useState({ assignees: [], fixVersions: [], lobs: [] });
@@ -21,98 +125,184 @@ const ExportForClaudeModal = ({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
   const [lobSearch, setLobSearch] = useState('');
+  /** 'cache' = use cachedPages; 'server' = Confluence re-fetch (multi-status or explicit reload). */
+  const [previewSource, setPreviewSource] = useState(() =>
+    cachedStatus != null && Array.isArray(cachedPages) ? 'cache' : 'server'
+  );
+  const [serverPullNonce, setServerPullNonce] = useState(0);
 
-  const loadOptions = useCallback(async () => {
+  const canUseBoardCache = useMemo(() => {
+    return (
+      Array.isArray(cachedPages) &&
+      cachedStatus != null &&
+      statusesSelected.length === 1 &&
+      statusesSelected[0] === cachedStatus
+    );
+  }, [cachedPages, cachedStatus, statusesSelected]);
+
+  useEffect(() => {
+    if (!canUseBoardCache) {
+      setPreviewSource('server');
+    }
+  }, [canUseBoardCache]);
+
+  const buildFilters = useCallback(() => {
+    const filters = {
+      assignees: assigneesSelected.length ? assigneesSelected : undefined,
+      fixVersions: fixVersionsSelected.length ? fixVersionsSelected : undefined,
+      lobs: lobsSelected.length ? lobsSelected : undefined
+    };
+    if (dateFilterType === 'actual') {
+      if (dateFrom) filters.actualLaunchDateFrom = dateFrom;
+      if (dateTo) filters.actualLaunchDateTo = dateTo;
+    } else if (dateFilterType === 'targeted') {
+      if (dateFrom) filters.targetedLaunchDateFrom = dateFrom;
+      if (dateTo) filters.targetedLaunchDateTo = dateTo;
+    }
+    return filters;
+  }, [
+    assigneesSelected,
+    fixVersionsSelected,
+    lobsSelected,
+    dateFilterType,
+    dateFrom,
+    dateTo
+  ]);
+
+  useEffect(() => {
     if (statusesSelected.length === 0) {
       setOptions({ assignees: [], fixVersions: [], lobs: [] });
-      return;
-    }
-    setOptionsLoading(true);
-    try {
-      const res = await authenticatedFetch('/api/export-for-claude-options', {
-        method: 'POST',
-        body: JSON.stringify({ statuses: statusesSelected })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setOptions({
-          assignees: data.assignees || [],
-          fixVersions: data.fixVersions || [],
-          lobs: data.lobs || []
-        });
-      }
-    } catch (e) {
-      console.warn('Export options failed:', e);
-    } finally {
+      setPreviewPages([]);
       setOptionsLoading(false);
+      setPreviewLoading(false);
     }
   }, [statusesSelected]);
 
-  const loadPreview = useCallback(async () => {
-    if (statusesSelected.length === 0) {
-      setPreviewPages([]);
-      return;
-    }
-    setPreviewLoading(true);
-    try {
-      const body = {
-        statuses: statusesSelected,
-        assignees: assigneesSelected.length ? assigneesSelected : undefined,
-        fixVersions: fixVersionsSelected.length ? fixVersionsSelected : undefined,
-        lobs: lobsSelected.length ? lobsSelected : undefined
-      };
-      if (dateFilterType === 'actual') {
-        if (dateFrom) body.actualLaunchDateFrom = dateFrom;
-        if (dateTo) body.actualLaunchDateTo = dateTo;
-      } else if (dateFilterType === 'targeted') {
-        if (dateFrom) body.targetedLaunchDateFrom = dateFrom;
-        if (dateTo) body.targetedLaunchDateTo = dateTo;
-      }
-      const res = await authenticatedFetch('/api/export-for-claude-preview', {
-        method: 'POST',
-        body: JSON.stringify(body)
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setPreviewPages(data.pages || []);
-      } else {
-        setPreviewPages([]);
-      }
-    } catch (e) {
-      setPreviewPages([]);
-    } finally {
-      setPreviewLoading(false);
-    }
-  }, [statusesSelected, assigneesSelected, fixVersionsSelected, lobsSelected, dateFilterType, dateFrom, dateTo]);
+  useEffect(() => {
+    if (statusesSelected.length === 0) return;
+    if (previewSource !== 'cache' || !canUseBoardCache) return;
+    setOptionsLoading(false);
+    setPreviewLoading(false);
+    setOptions(buildExportOptionsFromPages(cachedPages));
+    const filtered = applyExportFiltersClient(cachedPages, buildFilters());
+    setPreviewPages(filtered.map(toPreviewRow));
+  }, [
+    statusesSelected,
+    previewSource,
+    canUseBoardCache,
+    cachedPages,
+    buildFilters
+  ]);
 
   useEffect(() => {
-    loadOptions();
-  }, [loadOptions]);
+    if (exportLoading) return;
+    if (statusesSelected.length === 0) return;
+    if (previewSource === 'cache' && canUseBoardCache) return;
 
-  useEffect(() => {
-    loadPreview();
-  }, [loadPreview]);
+    let cancelled = false;
 
-  const toggleStatus = (key) => {
+    (async () => {
+      setOptionsLoading(true);
+      setPreviewLoading(true);
+      try {
+        const optionsRes = await authenticatedFetch('/api/export-for-claude-options', {
+          method: 'POST',
+          body: JSON.stringify({ statuses: statusesSelected })
+        });
+        if (cancelled) return;
+        if (optionsRes.ok) {
+          const data = await optionsRes.json();
+          if (cancelled) return;
+          setOptions({
+            assignees: data.assignees || [],
+            fixVersions: data.fixVersions || [],
+            lobs: data.lobs || []
+          });
+        }
+      } catch (e) {
+        console.warn('Export options failed:', e);
+      } finally {
+        if (!cancelled) setOptionsLoading(false);
+      }
+
+      if (cancelled) {
+        setPreviewLoading(false);
+        return;
+      }
+
+      try {
+        const body = {
+          statuses: statusesSelected,
+          assignees: assigneesSelected.length ? assigneesSelected : undefined,
+          fixVersions: fixVersionsSelected.length ? fixVersionsSelected : undefined,
+          lobs: lobsSelected.length ? lobsSelected : undefined
+        };
+        if (dateFilterType === 'actual') {
+          if (dateFrom) body.actualLaunchDateFrom = dateFrom;
+          if (dateTo) body.actualLaunchDateTo = dateTo;
+        } else if (dateFilterType === 'targeted') {
+          if (dateFrom) body.targetedLaunchDateFrom = dateFrom;
+          if (dateTo) body.targetedLaunchDateTo = dateTo;
+        }
+        const previewRes = await authenticatedFetch('/api/export-for-claude-preview', {
+          method: 'POST',
+          body: JSON.stringify(body)
+        });
+        if (cancelled) return;
+        if (previewRes.ok) {
+          const previewData = await previewRes.json();
+          if (cancelled) return;
+          setPreviewPages(previewData.pages || []);
+        } else if (!cancelled) {
+          setPreviewPages([]);
+        }
+      } catch (e) {
+        if (!cancelled) setPreviewPages([]);
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    exportLoading,
+    statusesSelected,
+    previewSource,
+    canUseBoardCache,
+    serverPullNonce,
+    assigneesSelected,
+    fixVersionsSelected,
+    lobsSelected,
+    dateFilterType,
+    dateFrom,
+    dateTo
+  ]);
+
+  const toggleStatus = key => {
     setStatusesSelected(prev =>
       prev.includes(key) ? prev.filter(s => s !== key) : [...prev, key]
     );
   };
 
-  const assigneesFiltered = (options.assignees || []).filter(a =>
-    !assigneeSearch.trim() || String(a).toLowerCase().includes(assigneeSearch.trim().toLowerCase())
+  const assigneesFiltered = (options.assignees || []).filter(
+    a =>
+      !assigneeSearch.trim() ||
+      String(a).toLowerCase().includes(assigneeSearch.trim().toLowerCase())
   );
-  const lobsFiltered = (options.lobs || []).filter(v =>
-    !lobSearch.trim() || String(v).toLowerCase().includes(lobSearch.trim().toLowerCase())
+  const lobsFiltered = (options.lobs || []).filter(
+    v =>
+      !lobSearch.trim() || String(v).toLowerCase().includes(lobSearch.trim().toLowerCase())
   );
 
-  const toggleAssignee = (name) => {
+  const toggleAssignee = name => {
     setAssigneesSelected(prev =>
       prev.includes(name) ? prev.filter(a => a !== name) : [...prev, name]
     );
   };
 
-  const toggleLob = (v) => {
+  const toggleLob = v => {
     setLobsSelected(prev =>
       prev.includes(v) ? prev.filter(l => l !== v) : [...prev, v]
     );
@@ -123,7 +313,9 @@ const ExportForClaudeModal = ({
       statuses: statusesSelected,
       assignees: assigneesSelected.length ? assigneesSelected : undefined,
       fixVersions: fixVersionsSelected.length ? fixVersionsSelected : undefined,
-      lobs: lobsSelected.length ? lobsSelected : undefined
+      lobs: lobsSelected.length ? lobsSelected : undefined,
+      previewPageIds:
+        previewPages.length > 0 ? previewPages.map(p => String(p.id)) : undefined
     };
     if (dateFilterType === 'actual') {
       if (dateFrom) payload.actualLaunchDateFrom = dateFrom;
@@ -135,17 +327,35 @@ const ExportForClaudeModal = ({
     onExport(payload);
   };
 
+  const handleReloadFromConfluence = () => {
+    setPreviewSource('server');
+    setServerPullNonce(n => n + 1);
+  };
+
+  const handleUseBoardCache = () => {
+    setPreviewSource('cache');
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal modal-lg export-for-claude-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h2>Export to Cursor — preferences</h2>
-          <button type="button" className="close-btn" onClick={onClose}>×</button>
+          <button type="button" className="close-btn" onClick={onClose}>
+            ×
+          </button>
         </div>
         <div className="modal-body export-for-claude-modal-body">
           <p className="export-claude-intro">
-            Choose filters below. All selected filters stack (e.g. Draft + assignee + fix version + date range). Confirm the page list, then export to zip.
+            Choose filters below. All selected filters stack (e.g. Draft + assignee + fix version + date
+            range). Confirm the page list, then export to zip.
           </p>
+          {canUseBoardCache && previewSource === 'cache' && (
+            <p className="export-cache-hint" style={{ fontSize: '0.9rem', color: 'var(--muted, #64748b)' }}>
+              Using pages already loaded for <strong>{statuses[cachedStatus]?.name || cachedStatus}</strong>.
+              Add another status or use <strong>Reload from Confluence</strong> if the board may be out of date.
+            </p>
+          )}
 
           <div className="export-prefs-grid">
             <div className="export-pref-section">
@@ -183,23 +393,27 @@ const ExportForClaudeModal = ({
                 {!optionsLoading && options.assignees.length > 0 && (
                   <>
                     {assigneesFiltered.length === 0 && (
-                      <div className="export-searchable-empty">No assignees match &quot;{assigneeSearch}&quot;</div>
+                      <div className="export-searchable-empty">
+                        No assignees match &quot;{assigneeSearch}&quot;
+                      </div>
                     )}
-                    {assigneesFiltered.length > 0 && assigneesFiltered.map(a => (
-                      <label key={a} className="export-searchable-option">
-                        <input
-                          type="checkbox"
-                          checked={assigneesSelected.includes(a)}
-                          onChange={() => toggleAssignee(a)}
-                        />
-                        <span>{a}</span>
-                      </label>
-                    ))}
+                    {assigneesFiltered.length > 0 &&
+                      assigneesFiltered.map(a => (
+                        <label key={a} className="export-searchable-option">
+                          <input
+                            type="checkbox"
+                            checked={assigneesSelected.includes(a)}
+                            onChange={() => toggleAssignee(a)}
+                          />
+                          <span>{a}</span>
+                        </label>
+                      ))}
                   </>
                 )}
               </div>
               <small className="export-pref-hint">
-                {assigneesSelected.length > 0 ? `${assigneesSelected.length} selected; ` : ''}Leave empty for any.
+                {assigneesSelected.length > 0 ? `${assigneesSelected.length} selected; ` : ''}Leave empty for
+                any.
               </small>
             </div>
 
@@ -216,13 +430,17 @@ const ExportForClaudeModal = ({
                 disabled={optionsLoading}
               >
                 {options.fixVersions.map(v => (
-                  <option key={v} value={v}>{v}</option>
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
                 ))}
                 {options.fixVersions.length === 0 && !optionsLoading && (
                   <option disabled>No fix versions in selected statuses</option>
                 )}
               </select>
-              <small className="export-pref-hint">Hold Ctrl/Cmd to select multiple; leave empty for any.</small>
+              <small className="export-pref-hint">
+                Hold Ctrl/Cmd to select multiple; leave empty for any.
+              </small>
             </div>
 
             <div className="export-pref-section">
@@ -244,18 +462,21 @@ const ExportForClaudeModal = ({
                 {!optionsLoading && options.lobs.length > 0 && (
                   <>
                     {lobsFiltered.length === 0 && (
-                      <div className="export-searchable-empty">No LOB values match &quot;{lobSearch}&quot;</div>
+                      <div className="export-searchable-empty">
+                        No LOB values match &quot;{lobSearch}&quot;
+                      </div>
                     )}
-                    {lobsFiltered.length > 0 && lobsFiltered.map(v => (
-                      <label key={v} className="export-searchable-option">
-                        <input
-                          type="checkbox"
-                          checked={lobsSelected.includes(v)}
-                          onChange={() => toggleLob(v)}
-                        />
-                        <span>{v}</span>
-                      </label>
-                    ))}
+                    {lobsFiltered.length > 0 &&
+                      lobsFiltered.map(v => (
+                        <label key={v} className="export-searchable-option">
+                          <input
+                            type="checkbox"
+                            checked={lobsSelected.includes(v)}
+                            onChange={() => toggleLob(v)}
+                          />
+                          <span>{v}</span>
+                        </label>
+                      ))}
                   </>
                 )}
               </div>
@@ -301,19 +522,33 @@ const ExportForClaudeModal = ({
           <div className="export-preview-section">
             <div className="export-preview-header">
               <label className="export-pref-label">Pages to export ({previewPages.length})</label>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={loadPreview}
-                disabled={previewLoading || statusesSelected.length === 0}
-              >
-                {previewLoading ? 'Loading…' : 'Refresh preview'}
-              </button>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                {canUseBoardCache && previewSource === 'server' && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleUseBoardCache}
+                    disabled={previewLoading || optionsLoading}
+                  >
+                    Use loaded board
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={handleReloadFromConfluence}
+                  disabled={previewLoading || optionsLoading || statusesSelected.length === 0}
+                >
+                  {previewLoading || optionsLoading ? 'Loading…' : 'Reload from Confluence'}
+                </button>
+              </div>
             </div>
             <div className="export-preview-list">
               {previewLoading && <div className="export-preview-loading">Loading preview…</div>}
               {!previewLoading && previewPages.length === 0 && (
-                <div className="export-preview-empty">No pages match the current filters. Adjust statuses or other filters.</div>
+                <div className="export-preview-empty">
+                  No pages match the current filters. Adjust statuses or other filters.
+                </div>
               )}
               {!previewLoading && previewPages.length > 0 && (
                 <ul className="export-preview-ul">
@@ -333,7 +568,9 @@ const ExportForClaudeModal = ({
           </div>
         </div>
         <div className="modal-footer">
-          <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn btn-secondary" onClick={onClose}>
+            Cancel
+          </button>
           <button
             type="button"
             className="btn btn-primary"

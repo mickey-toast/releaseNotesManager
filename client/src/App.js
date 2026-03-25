@@ -5934,6 +5934,8 @@ function App() {
       {showExportForClaudeModal && (
         <ExportForClaudeModal
           statuses={statuses}
+          cachedPages={currentView === 'status' ? pages : null}
+          cachedStatus={currentView === 'status' ? currentStatus : null}
           onClose={() => setShowExportForClaudeModal(false)}
           onExport={handleExportForClaude}
           exportLoading={exportForClaudeLoading}
