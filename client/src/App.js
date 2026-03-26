@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useId } from 'react';
 import './App.css';
 import SettingsModal from './SettingsModal';
 import ExportForClaudeModal from './ExportForClaudeModal';
@@ -66,10 +66,64 @@ const ConfettiCelebration = ({ onComplete }) => {
 
 // Theme options
 const THEMES = [
-  { id: 'dim', name: 'Dim', icon: '' },
-  { id: 'dark', name: 'Dark', icon: '' },
-  { id: 'light', name: 'Light', icon: '' }
+  { id: 'dim', name: 'Dim' },
+  { id: 'dark', name: 'Dark' },
+  { id: 'light', name: 'Light' }
 ];
+
+/** Simple inline SVGs so the trigger always renders clearly (no empty emoji slot). */
+function ThemeGlyph({ themeId, className = '' }) {
+  const dimGradId = useId();
+  const svgProps = {
+    className: `theme-glyph ${className}`.trim(),
+    width: 20,
+    height: 20,
+    viewBox: '0 0 24 24',
+    'aria-hidden': true,
+    focusable: false
+  };
+
+  if (themeId === 'light') {
+    return (
+      <svg {...svgProps}>
+        <circle cx="12" cy="12" r="4" fill="currentColor" />
+        <path
+          d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+
+  if (themeId === 'dark') {
+    return (
+      <svg {...svgProps}>
+        <path
+          fill="currentColor"
+          fillRule="evenodd"
+          d="M9.528 1.718a.75.75 0 01.162.819A8.97 8.97 0 009 6a9 9 0 009 9 8.97 8.97 0 003.463-.69.75.75 0 01.981.98 10.503 10.503 0 01-9.694 6.46c-5.799 0-10.5-4.701-10.5-10.5 0-4.368 2.667-8.112 6.46-9.694a.75.75 0 01.818.162z"
+          clipRule="evenodd"
+        />
+      </svg>
+    );
+  }
+
+  // dim — horizontal half light / half dark (between sun and full moon)
+  return (
+    <svg {...svgProps}>
+      <defs>
+        <linearGradient id={dimGradId} x1="4" y1="12" x2="20" y2="12" gradientUnits="userSpaceOnUse">
+          <stop stopColor="currentColor" stopOpacity="0.35" />
+          <stop offset="1" stopColor="currentColor" stopOpacity="1" />
+        </linearGradient>
+      </defs>
+      <circle cx="12" cy="12" r="8" fill={`url(#${dimGradId})`} />
+    </svg>
+  );
+}
 
 // Theme picker component
 const ThemePicker = () => {
@@ -83,28 +137,34 @@ const ThemePicker = () => {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  const currentTheme = THEMES.find(t => t.id === theme);
-
   return (
     <div className="theme-picker">
-      <button 
+      <button
+        type="button"
         className="theme-picker-btn"
         onClick={() => setIsOpen(!isOpen)}
         title="Change theme"
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
       >
-        {currentTheme?.icon}
+        <ThemeGlyph themeId={theme} />
       </button>
       {isOpen && (
         <>
           <div className="overflow-backdrop" onClick={() => setIsOpen(false)} />
-          <div className="theme-dropdown">
+          <div className="theme-dropdown" role="listbox" aria-label="Theme">
             {THEMES.map(t => (
               <button
                 key={t.id}
+                type="button"
+                role="option"
+                aria-selected={theme === t.id}
                 className={`theme-option ${theme === t.id ? 'active' : ''}`}
                 onClick={() => { setTheme(t.id); setIsOpen(false); }}
               >
-                <span className="theme-icon">{t.icon}</span>
+                <span className="theme-icon">
+                  <ThemeGlyph themeId={t.id} />
+                </span>
                 <span>{t.name}</span>
                 {theme === t.id && <span className="theme-check">✓</span>}
               </button>

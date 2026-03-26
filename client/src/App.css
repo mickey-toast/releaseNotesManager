@@ -305,12 +305,19 @@
   border-radius: 10px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border-light);
+  color: var(--text-primary);
   font-size: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: var(--transition-fast);
+}
+
+.theme-picker-btn .theme-glyph,
+.theme-icon .theme-glyph {
+  display: block;
+  flex-shrink: 0;
 }
 
 .theme-picker-btn:hover {
@@ -360,6 +367,9 @@
 
 .theme-icon {
   font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .theme-check {
@@ -528,8 +538,8 @@
 /* Status Tabs */
 .status-tabs {
   display: flex;
-  gap: 4px;
-  padding: 0 32px;
+  gap: 8px;
+  padding: 10px 32px 14px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-subtle);
   max-width: 1464px;
@@ -542,7 +552,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 14px 18px;
   background: transparent;
   color: var(--text-secondary);
   font-size: 13px;
@@ -647,9 +657,14 @@
 .controls-bar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: 20px;
+  margin-bottom: 20px;
   flex-wrap: wrap;
+}
+
+/* Space between status tabs strip and search / filters (same view as board) */
+nav.status-tabs + .controls-bar {
+  margin-top: 16px;
 }
 
 .search-box {
@@ -670,7 +685,7 @@
 
 .search-box input {
   width: 100%;
-  padding: 10px 16px 10px 42px;
+  padding: 12px 16px 12px 42px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-light);
   border-radius: 8px;
@@ -693,7 +708,7 @@
 .time-filter,
 .education-status-filter,
 .fix-version-filter {
-  padding: 10px 14px;
+  padding: 12px 16px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-light);
   border-radius: 8px;
@@ -725,9 +740,10 @@
 .controls-info {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 20px;
   margin-left: auto;
   font-size: 13px;
+  flex-shrink: 0;
 }
 
 .export-csv-btn {
@@ -2217,7 +2233,11 @@
   }
   
   .status-tabs {
-    padding: 0 16px;
+    padding: 8px 16px 12px;
+  }
+
+  nav.status-tabs + .controls-bar {
+    margin-top: 12px;
   }
   
   .app-main {
