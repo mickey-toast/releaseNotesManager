@@ -5,6 +5,8 @@ import { isSettingsSuperAdmin } from './settingsAdminAccess';
 import { usePermissions } from './permissionsContext';
 import { DEFAULT_TEMPLATES, getTemplates } from './templateConstants';
 import { getAuditCategoryPreferences, setAuditCategoryPreferences, ACTIVITY_CATEGORIES } from './activityLog';
+import NotificationRulesSettings from './NotificationRulesSettings';
+import { getNotificationRulesFromStorage } from './notificationRulesClient';
 
 // Available Jira fields that can be displayed
 const AVAILABLE_FIELDS = [
@@ -68,6 +70,7 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
   const [fieldPreferences, setFieldPreferences] = useState(getDefaultFieldPreferences());
   const [templates, setTemplates] = useState(getDefaultTemplates());
   const [auditCategories, setAuditCategories] = useState(getAuditCategoryPreferences());
+  const [notificationRules, setNotificationRules] = useState(() => getNotificationRulesFromStorage());
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [appAuthEmail, setAppAuthEmail] = useState(null);
@@ -180,6 +183,8 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
     
     // Save activity log category preferences
     setAuditCategoryPreferences(auditCategories);
+
+    localStorage.setItem('notificationRules', JSON.stringify(notificationRules));
     
     // Trigger event to update QuickCommentMenu components
     window.dispatchEvent(new Event('settingsSaved'));
@@ -201,6 +206,7 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
       { id: 'jiraFields', label: 'Jira Fields' },
       { id: 'templates', label: 'Templates' },
       { id: 'export', label: 'Export' },
+      { id: 'notifications', label: 'Scheduled notifications' },
       { id: 'activityLog', label: 'Activity Log' },
       { id: 'superAdmin', label: 'Admin' }
     ];
@@ -209,10 +215,11 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
       if (s.id === 'styleGuide' && !perms.ai) return false;
       if (s.id === 'launchnotes' && !perms.launchnotes) return false;
       if (s.id === 'export' && !perms.export) return false;
+      if (s.id === 'notifications' && !perms.notifications) return false;
       if (s.id === 'superAdmin' && !showSettingsAdminSection) return false;
       return true;
     });
-  }, [perms.ai, perms.launchnotes, perms.export, showSettingsAdminSection]);
+  }, [perms.ai, perms.launchnotes, perms.export, perms.notifications, showSettingsAdminSection]);
 
   useEffect(() => {
     if (!sections.find((s) => s.id === activeSection)) {
@@ -630,6 +637,10 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
                   </label>
                 </div>
               </div>
+            )}
+
+            {activeSection === 'notifications' && (
+              <NotificationRulesSettings rules={notificationRules} setRules={setNotificationRules} />
             )}
 
             {activeSection === 'activityLog' && (

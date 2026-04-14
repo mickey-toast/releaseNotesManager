@@ -22,6 +22,12 @@ export function applyCloudPayloadToBrowser(payload) {
   if (Array.isArray(payload.quickCommentTemplates)) {
     localStorage.setItem('quickCommentTemplates', JSON.stringify(payload.quickCommentTemplates));
   }
+  if (Array.isArray(payload.notificationRules)) {
+    localStorage.setItem('notificationRules', JSON.stringify(payload.notificationRules));
+  }
+  if (payload.notificationDeliveryLog && typeof payload.notificationDeliveryLog === 'object') {
+    localStorage.setItem('notificationDeliveryLog', JSON.stringify(payload.notificationDeliveryLog));
+  }
   if (payload.auditCategoryPreferences && typeof payload.auditCategoryPreferences === 'object') {
     setAuditCategoryPreferences(payload.auditCategoryPreferences);
   }
@@ -61,7 +67,12 @@ export async function saveSettingsProfileToCloud(confluenceSettings) {
     confluenceSettings,
     jiraFieldPreferences: safeJsonParse(localStorage.getItem('jiraFieldPreferences'), {}),
     quickCommentTemplates: safeJsonParse(localStorage.getItem('quickCommentTemplates'), []),
-    auditCategoryPreferences: getAuditCategoryPreferences()
+    auditCategoryPreferences: getAuditCategoryPreferences(),
+    notificationRules: safeJsonParse(localStorage.getItem('notificationRules'), []),
+    notificationDeliveryLog: (() => {
+      const raw = safeJsonParse(localStorage.getItem('notificationDeliveryLog'), {});
+      return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    })()
   };
   try {
     const res = await authenticatedFetch('/api/me/profile', {

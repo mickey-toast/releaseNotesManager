@@ -7,7 +7,8 @@ const defaultState = {
   isAdmin: false,
   export: true,
   ai: true,
-  launchnotes: true
+  launchnotes: true,
+  notifications: true
 };
 
 const PermissionsContext = createContext({ ...defaultState, refresh: async () => {} });
@@ -37,7 +38,8 @@ export function PermissionsProvider({ children }) {
         isAdmin: !!data.isAdmin,
         export: data.export !== false,
         ai: data.ai !== false,
-        launchnotes: data.launchnotes !== false
+        launchnotes: data.launchnotes !== false,
+        notifications: data.notifications !== false
       });
     } catch {
       setState({ ...defaultState, loaded: true });

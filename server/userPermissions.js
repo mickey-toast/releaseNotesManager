@@ -35,6 +35,17 @@ const PERMISSION_KEYS = {
       'Sending page content to LaunchNotes as drafts (POST /api/launchnotes/create-draft)'
     ],
     defaultAllowed: true
+  },
+  notifications: {
+    label: 'Scheduled Jira notifications',
+    description:
+      'Allows configuring rules that post Jira comments when launch dates approach, and running those checks. Denying this hides the notification rules UI and blocks POST /api/notifications/run-due.',
+    covers: [
+      'Settings → Scheduled notifications: create and edit rules',
+      'Automatic checks while the app is open and the manual Run due notifications action',
+      'Server-side execution of due rules (Jira comments)'
+    ],
+    defaultAllowed: true
   }
 };
 

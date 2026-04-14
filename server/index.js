@@ -18,6 +18,16 @@ const auditLogRoutes = require('./auditLogRoutes');
 const meRoutes = require('./meRoutes');
 const adminRoutes = require('./adminRoutes');
 const { requirePermission } = require('./permissionMiddleware');
+const {
+  launchRawFromPage,
+  pageMatchesLaunchDayRange,
+  computeSendInstantMillis,
+  buildDedupeKey,
+  interpolateTemplate,
+  buildTemplateVars,
+  normalizeRulesList,
+  trimDeliveryLog
+} = require('./notificationRulesEngine');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -3996,6 +4006,167 @@ function applyExportFilters(pages, filters) {
   }
   return out;
 }
+
+const NOTIFICATION_FETCH_STATUSES = Object.keys(PAGE_STATUSES).filter((k) => k !== 'discard');
+
+// Run due Jira notification rules (scheduled comments). Client sends rules + delivery log; server posts when due.
+// Each rule is independent: a page is only considered for rule R if (1) R's status filter passes, (2) it has Jira,
+// (3) launch date is set, (4) whole calendar days until launch is in [R.minDays, R.withinDays], (5) now >= R's
+// scheduled send instant, (6) R has not already posted for this page+launch. No other rule or path sends here.
+app.post('/api/notifications/run-due', requirePermission('notifications'), async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    if (!credentials || !credentials.email || !credentials.token) {
+      return res.status(401).json({ error: 'Atlassian credentials required' });
+    }
+    const rules = normalizeRulesList(req.body && req.body.rules);
+    const enabledRules = rules.filter((r) => r.enabled);
+    if (enabledRules.length === 0) {
+      return res.json({
+        ok: true,
+        posted: [],
+        skipped: [],
+        failed: [],
+        message: 'No enabled notification rules.',
+        deliveryLog: trimDeliveryLog(req.body && req.body.deliveryLog)
+      });
+    }
+
+    let deliveryLog = trimDeliveryLog(
+      req.body && req.body.deliveryLog && typeof req.body.deliveryLog === 'object' && !Array.isArray(req.body.deliveryLog)
+        ? req.body.deliveryLog
+        : {}
+    );
+
+    const statusUnion = new Set();
+    for (const rule of enabledRules) {
+      if (rule.statuses && rule.statuses.length > 0) {
+        rule.statuses.forEach((s) => {
+          if (PAGE_STATUSES[s]) statusUnion.add(s);
+        });
+      }
+    }
+    const statusKeys =
+      statusUnion.size > 0 ? [...statusUnion] : NOTIFICATION_FETCH_STATUSES;
+
+    const { jiraApi: userJiraApi } = createApiClients(credentials);
+    const allPages = await fetchPagesForStatuses(statusKeys, req, credentials);
+    const now = Date.now();
+
+    const posted = [];
+    const skipped = [];
+    const failed = [];
+
+    for (const rule of enabledRules) {
+      const tz = rule.schedule.timeZone;
+      const pagesForRule = allPages.filter((p) => {
+        if (!p.jiraTicket) return false;
+        if (rule.statuses && rule.statuses.length > 0 && !rule.statuses.includes(p.status)) {
+          return false;
+        }
+        return true;
+      });
+
+      for (const page of pagesForRule) {
+        const launchRaw = launchRawFromPage(page, rule.criteria.dateField);
+        if (!launchRaw) {
+          skipped.push({ ruleId: rule.id, pageId: page.id, reason: 'no_launch_date' });
+          continue;
+        }
+        if (
+          !pageMatchesLaunchDayRange(
+            launchRaw,
+            rule.criteria.minDaysUntilLaunch ?? 0,
+            rule.criteria.withinDays,
+            tz,
+            now
+          )
+        ) {
+          skipped.push({ ruleId: rule.id, pageId: page.id, reason: 'outside_launch_window' });
+          continue;
+        }
+        const sendAt = computeSendInstantMillis(
+          launchRaw,
+          rule.schedule.offsetDaysFromLaunch,
+          rule.schedule.timeLocal,
+          tz
+        );
+        if (sendAt == null) {
+          skipped.push({ ruleId: rule.id, pageId: page.id, reason: 'invalid_schedule' });
+          continue;
+        }
+        if (now < sendAt) {
+          skipped.push({ ruleId: rule.id, pageId: page.id, reason: 'not_yet_due' });
+          continue;
+        }
+        const dedupeKey = buildDedupeKey(rule.id, page.id, launchRaw);
+        if (deliveryLog[dedupeKey]) {
+          skipped.push({ ruleId: rule.id, pageId: page.id, reason: 'already_sent' });
+          continue;
+        }
+
+        const vars = buildTemplateVars(page, credentials);
+        const text = interpolateTemplate(rule.action.bodyTemplate, vars);
+        if (!text.trim()) {
+          skipped.push({ ruleId: rule.id, pageId: page.id, reason: 'empty_body' });
+          continue;
+        }
+
+        try {
+          const content = parseMentionsToADF(text, []);
+          await userJiraApi.post(`/rest/api/3/issue/${page.jiraTicket}/comment`, {
+            body: {
+              type: 'doc',
+              version: 1,
+              content: [{ type: 'paragraph', content }]
+            }
+          });
+          deliveryLog = {
+            ...deliveryLog,
+            [dedupeKey]: {
+              sentAt: new Date().toISOString(),
+              jiraTicket: page.jiraTicket,
+              title: page.title,
+              ruleId: rule.id,
+              ruleName: rule.name
+            }
+          };
+          posted.push({
+            ruleId: rule.id,
+            pageId: page.id,
+            jiraTicket: page.jiraTicket,
+            title: page.title
+          });
+        } catch (jiraError) {
+          console.error('[notifications/run-due]', page.jiraTicket, jiraError.response?.data || jiraError.message);
+          failed.push({
+            ruleId: rule.id,
+            pageId: page.id,
+            jiraTicket: page.jiraTicket,
+            error: jiraError.response?.data?.errorMessages?.join(', ') || jiraError.message
+          });
+        }
+      }
+    }
+
+    deliveryLog = trimDeliveryLog(deliveryLog);
+
+    res.json({
+      ok: true,
+      posted,
+      skipped: skipped.slice(0, 200),
+      failed,
+      skippedTruncated: skipped.length > 200,
+      deliveryLog
+    });
+  } catch (error) {
+    console.error('Error in notifications/run-due:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to run notification rules',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
 
 // Get filter options for Export for Claude (assignees, fix versions, LOB) for the given statuses
 app.post('/api/export-for-claude-options', requirePermission('export'), async (req, res) => {

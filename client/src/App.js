@@ -7,6 +7,7 @@ import ActivityLogModal from './ActivityLogModal';
 import { authenticatedFetch, getAuthHeaders, getAppAuthHeaders, hasCredentials, getCredentials, shouldShowField, getDebugLogs, clearDebugLogs } from './api';
 import { signOutApp, isSupabaseAuthConfigured } from './supabaseClient';
 import { hydrateSettingsFromCloud, saveSettingsProfileToCloud } from './cloudProfile';
+import { getNotificationRulesFromStorage, runDueNotificationRules } from './notificationRulesClient';
 import { usePermissions } from './permissionsContext';
 import AdminPortal from './AdminPortal';
 import { logActivity, ACTIVITY_CATEGORIES } from './activityLog';
@@ -3570,6 +3571,30 @@ function App() {
     mq.addEventListener('change', sync);
     return () => mq.removeEventListener('change', sync);
   }, []);
+
+  // Scheduled Jira notification rules: check periodically while app is open (uses saved credentials).
+  useEffect(() => {
+    if (!perms.loaded || perms.notifications === false) return undefined;
+    const tick = async () => {
+      if (!hasCredentials()) return;
+      const rules = getNotificationRulesFromStorage();
+      if (!rules.some((r) => r.enabled !== false)) return;
+      try {
+        await runDueNotificationRules();
+      } catch (_) {
+        /* ignore */
+      }
+    };
+    const intervalId = window.setInterval(tick, 12 * 60 * 1000);
+    const onSettingsSaved = () => {
+      tick();
+    };
+    window.addEventListener('settingsSaved', onSettingsSaved);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('settingsSaved', onSettingsSaved);
+    };
+  }, [perms.loaded, perms.notifications]);
 
   const collapseSidebarOnNavigate = useCallback(() => {
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 899px)').matches) {
