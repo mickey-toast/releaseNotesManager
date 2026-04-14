@@ -9,7 +9,10 @@ const fs = require('fs');
 const archiver = require('archiver');
 const AdmZip = require('adm-zip');
 const multer = require('multer');
+const { marked } = require('marked');
 const { requireSupabaseAuth } = require('./authMiddleware');
+
+marked.use({ gfm: true, breaks: false });
 const userProfileRoutes = require('./userProfileRoutes');
 const auditLogRoutes = require('./auditLogRoutes');
 const meRoutes = require('./meRoutes');
@@ -4290,6 +4293,20 @@ function parseDraftMarkdown(raw) {
   return { frontmatter, body };
 }
 
+/**
+ * Render markdown as HTML for Confluence storage format so pages view correctly without a Markdown macro/app.
+ * (The ac:name="markdown" macro often shows "Error loading the extension!" when the app fails or conflicts with page builders.)
+ */
+function markdownToConfluenceStorageHtml(markdown) {
+  const src = String(markdown || '').trim();
+  if (!src) return '';
+  let html = marked.parse(src);
+  html = html
+    .replace(/<br\s*\/?>/gi, '<br/>')
+    .replace(/<hr\s*\/?>/gi, '<hr/>');
+  return html;
+}
+
 // Import from Claude output: upload a zip containing drafts/*.md (or any .md), get back list of drafts for LaunchNotes
 app.post('/api/import-from-claude', requirePermission('export'), upload.single('zip'), async (req, res) => {
   try {
@@ -4328,7 +4345,7 @@ app.post('/api/import-from-claude', requirePermission('export'), upload.single('
   }
 });
 
-// Prepend rewritten (imported) content to Confluence pages – markdown at top, then separator, then existing body
+// Prepend rewritten (imported) content to Confluence pages – rendered HTML at top, then separator, then existing body
 app.post('/api/pages/prepend-imported-content', async (req, res) => {
   try {
     const credentials = getCredentialsFromRequest(req);
@@ -4358,14 +4375,13 @@ app.post('/api/pages/prepend-imported-content', async (req, res) => {
           failed.push({ pageId, error: 'Could not read page version' });
           continue;
         }
+        const prependedHtml = markdownToConfluenceStorageHtml(content);
+        const separator = prependedHtml ? '<p><hr/></p>' : '';
         const cdataContent = String(content).replace(/\]\]>/g, ']]]]><![CDATA[>');
-        const markdownBlock =
-          '<ac:structured-macro ac:name="markdown"><ac:plain-text-body><![CDATA[' + cdataContent + ']]></ac:plain-text-body></ac:structured-macro>' +
-          '<p><hr/></p>';
         const codeBlock =
           '<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">markdown</ac:parameter><ac:plain-text-body><![CDATA[' + cdataContent + ']]></ac:plain-text-body></ac:structured-macro>' +
           '<p><hr/></p>';
-        let newBodyValue = markdownBlock + existingBody;
+        let newBodyValue = prependedHtml + separator + existingBody;
         const putPayload = {
           id: pageId,
           type: 'page',

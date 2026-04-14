@@ -99,12 +99,29 @@ function toPreviewRow(p) {
   };
 }
 
+/** Keep table order from ids; only include rows that appear in list. */
+function applyBoardSelectionConstraint(rows, ids) {
+  if (!ids || ids.length === 0) return rows;
+  const byId = new Map((rows || []).map(r => [String(r.id), r]));
+  const out = [];
+  for (const id of ids) {
+    const r = byId.get(String(id));
+    if (r) out.push(r);
+  }
+  return out;
+}
+
 const ExportForClaudeModal = ({
   statuses = {},
   /** Pages already loaded for the active board column (same shape as GET /api/pages). */
   cachedPages = null,
   /** Status key for that column, e.g. 'draft'. */
   cachedStatus = null,
+  /**
+   * When set (e.g. from board multi-select), preview and export are limited to these page ids
+   * in this order, intersected with the current filter preview. User can clear to use full filter.
+   */
+  initialBoardSelectionIds = null,
   onClose,
   onExport,
   exportLoading = false
@@ -130,6 +147,9 @@ const ExportForClaudeModal = ({
     cachedStatus != null && Array.isArray(cachedPages) ? 'cache' : 'server'
   );
   const [serverPullNonce, setServerPullNonce] = useState(0);
+  const [boardSelectionIds, setBoardSelectionIds] = useState(() =>
+    initialBoardSelectionIds?.length ? initialBoardSelectionIds.map(String) : null
+  );
 
   const canUseBoardCache = useMemo(() => {
     return (
@@ -185,13 +205,14 @@ const ExportForClaudeModal = ({
     setPreviewLoading(false);
     setOptions(buildExportOptionsFromPages(cachedPages));
     const filtered = applyExportFiltersClient(cachedPages, buildFilters());
-    setPreviewPages(filtered.map(toPreviewRow));
+    setPreviewPages(applyBoardSelectionConstraint(filtered.map(toPreviewRow), boardSelectionIds));
   }, [
     statusesSelected,
     previewSource,
     canUseBoardCache,
     cachedPages,
-    buildFilters
+    buildFilters,
+    boardSelectionIds
   ]);
 
   useEffect(() => {
@@ -252,7 +273,9 @@ const ExportForClaudeModal = ({
         if (previewRes.ok) {
           const previewData = await previewRes.json();
           if (cancelled) return;
-          setPreviewPages(previewData.pages || []);
+          setPreviewPages(
+            applyBoardSelectionConstraint(previewData.pages || [], boardSelectionIds)
+          );
         } else if (!cancelled) {
           setPreviewPages([]);
         }
@@ -277,7 +300,8 @@ const ExportForClaudeModal = ({
     lobsSelected,
     dateFilterType,
     dateFrom,
-    dateTo
+    dateTo,
+    boardSelectionIds
   ]);
 
   const toggleStatus = key => {
@@ -350,6 +374,15 @@ const ExportForClaudeModal = ({
             Choose filters below. All selected filters stack (e.g. Draft + assignee + fix version + date
             range). Confirm the page list, then export to zip.
           </p>
+          {boardSelectionIds && boardSelectionIds.length > 0 && (
+            <p className="export-cache-hint" style={{ fontSize: '0.9rem', color: 'var(--muted, #64748b)' }}>
+              Started from <strong>{boardSelectionIds.length}</strong> page
+              {boardSelectionIds.length === 1 ? '' : 's'} selected on the board. The list below is that
+              selection narrowed by your filters (or reloaded from Confluence). Use{' '}
+              <strong>Show all matching pages</strong> if you want every page that matches the filters, not
+              only the board selection.
+            </p>
+          )}
           {canUseBoardCache && previewSource === 'cache' && (
             <p className="export-cache-hint" style={{ fontSize: '0.9rem', color: 'var(--muted, #64748b)' }}>
               Using pages already loaded for <strong>{statuses[cachedStatus]?.name || cachedStatus}</strong>.
@@ -523,6 +556,17 @@ const ExportForClaudeModal = ({
             <div className="export-preview-header">
               <label className="export-pref-label">Pages to export ({previewPages.length})</label>
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                {boardSelectionIds && boardSelectionIds.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setBoardSelectionIds(null)}
+                    disabled={previewLoading || optionsLoading}
+                    title="Use the full filtered page list instead of only your board selection"
+                  >
+                    Show all matching pages
+                  </button>
+                )}
                 {canUseBoardCache && previewSource === 'server' && (
                   <button
                     type="button"

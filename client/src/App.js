@@ -3431,8 +3431,20 @@ const MyTasksView = ({ tasksByStatus, statuses, onPageClick, onMove, onViewComme
 };
 
 // Bulk actions bar
-const BulkActionsBar = ({ selectedCount, onEdit, onClearSelection, onBatchAIGenerate, batchAIGenerating, onSyncFromConfluence, syncingFromConfluence, onRefreshFromJira, refreshingJira, hasJiraTickets }) => {
-  const { ai: canAi } = usePermissions();
+const BulkActionsBar = ({
+  selectedCount,
+  onEdit,
+  onClearSelection,
+  onBatchAIGenerate,
+  batchAIGenerating,
+  onSyncFromConfluence,
+  syncingFromConfluence,
+  onRefreshFromJira,
+  refreshingJira,
+  hasJiraTickets,
+  onExportToCursor
+}) => {
+  const { ai: canAi, export: canExport } = usePermissions();
   if (selectedCount === 0) return null;
 
   return (
@@ -3445,6 +3457,16 @@ const BulkActionsBar = ({ selectedCount, onEdit, onClearSelection, onBatchAIGene
         >
           ✏️ Edit
         </button>
+        {canExport && onExportToCursor && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={onExportToCursor}
+            title="Open Export to Cursor with only the selected pages (you can adjust filters in the modal)"
+          >
+            Export to Cursor…
+          </button>
+        )}
         {onSyncFromConfluence && (
           <button 
             className="btn btn-secondary btn-sm"
@@ -3513,6 +3535,8 @@ function App() {
   const [timeFilter, setTimeFilter] = useState(''); // '', 'today', 'thisWeek', 'thisMonth'
   const [showSettings, setShowSettings] = useState(false);
   const [showExportForClaudeModal, setShowExportForClaudeModal] = useState(false);
+  /** When non-null, Export to Cursor modal limits preview/export to these page ids (from board multi-select). */
+  const [exportForClaudeInitialPageIds, setExportForClaudeInitialPageIds] = useState(null);
   const [showActivityLog, setShowActivityLog] = useState(false);
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [lastMove, setLastMove] = useState(null); // Track last move for undo
@@ -4782,6 +4806,7 @@ function App() {
       addToast('Export for Claude downloaded. Unzip and use with Claude Code or Cursor (see INSTRUCTIONS.md).', 'success');
       logActivity('export', 'Downloaded Export for Claude / Cursor zip', { scope: 'claude_zip_export' });
       setShowExportForClaudeModal(false);
+      setExportForClaudeInitialPageIds(null);
     } catch (err) {
       addToast(err.message || 'Export for Claude failed', 'error');
     } finally {
@@ -4817,6 +4842,12 @@ function App() {
     const selectedPageObjects = sortedPages.filter(p => selectedPages.has(p.id));
     setBulkEditAction({ pages: selectedPageObjects });
   }, [selectedPages, sortedPages]);
+
+  const handleBulkExportToCursor = useCallback(() => {
+    if (!perms.export || selectedPages.size === 0) return;
+    setExportForClaudeInitialPageIds(Array.from(selectedPages, id => String(id)));
+    setShowExportForClaudeModal(true);
+  }, [perms.export, selectedPages]);
 
   const handleAddToLaunchNotes = useCallback((pages) => {
     if (!perms.launchnotes) {
@@ -5621,6 +5652,7 @@ function App() {
               onRefreshFromJira={selectedPages.size > 0 ? () => handleRefreshFromJira(Array.from(selectedPages)) : undefined}
               refreshingJira={refreshingJira}
               hasJiraTickets={Array.from(selectedPages).some(id => pages.find(p => p.id === id)?.jiraTicket)}
+              onExportToCursor={handleBulkExportToCursor}
             />
 
             {error && (
@@ -5996,7 +6028,11 @@ function App() {
           statuses={statuses}
           cachedPages={currentView === 'status' ? pages : null}
           cachedStatus={currentView === 'status' ? currentStatus : null}
-          onClose={() => setShowExportForClaudeModal(false)}
+          initialBoardSelectionIds={exportForClaudeInitialPageIds}
+          onClose={() => {
+            setShowExportForClaudeModal(false);
+            setExportForClaudeInitialPageIds(null);
+          }}
           onExport={handleExportForClaude}
           exportLoading={exportForClaudeLoading}
         />
@@ -6019,7 +6055,11 @@ function App() {
           onMasterExport={handleMasterExportToCsv}
           masterExportLoading={masterExportLoading}
           exportStatuses={statuses}
-          onOpenExportForClaudeModal={() => { setShowSettings(false); setShowExportForClaudeModal(true); }}
+          onOpenExportForClaudeModal={() => {
+            setShowSettings(false);
+            setExportForClaudeInitialPageIds(null);
+            setShowExportForClaudeModal(true);
+          }}
           onExportForClaude={handleExportForClaude}
           exportForClaudeLoading={exportForClaudeLoading}
           onImportFromClaude={handleImportFromClaude}
