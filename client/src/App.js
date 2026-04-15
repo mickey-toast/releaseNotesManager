@@ -207,8 +207,32 @@ const getStatusColor = (category) => {
 };
 
 // Page Detail Panel component
-const PageDetailPanel = ({ page, onClose, statuses, currentStatus, onMove, onViewComments, onAddComment, onViewJiraComments, isAssigned, onAssign, onUnassign, onAddToLaunchNotes, onAISuggestions, onCheckCompliance, onSyncFromConfluence, syncingFromConfluence, onRefreshFromJira, refreshingJira, onNotesUpdated, addToast }) => {
+const PageDetailPanel = ({
+  page,
+  onClose,
+  statuses,
+  currentStatus,
+  onMove,
+  onViewComments,
+  onAddComment,
+  onViewJiraComments,
+  isAssigned,
+  onAssign,
+  onUnassign,
+  onAddToLaunchNotes,
+  onAISuggestions,
+  onCheckCompliance,
+  onSyncFromConfluence,
+  syncingFromConfluence,
+  onRefreshFromJira,
+  refreshingJira,
+  onNotesUpdated,
+  onCreateDocTicket,
+  docTicketsBusy,
+  addToast
+}) => {
   const { ai: canAi, launchnotes: canLn } = usePermissions();
+  const [docTicketCreating, setDocTicketCreating] = useState(false);
   const [jiraData, setJiraData] = useState(null);
   const [jiraLoading, setJiraLoading] = useState(false);
   const [jiraError, setJiraError] = useState(null);
@@ -370,6 +394,24 @@ const PageDetailPanel = ({ page, onClose, statuses, currentStatus, onMove, onVie
                   title="Create draft in LaunchNotes"
                 >
                   Add to LaunchNotes
+                </button>
+              )}
+              {page.jiraTicket && onCreateDocTicket && (
+                <button
+                  type="button"
+                  className="quick-action-btn"
+                  disabled={docTicketCreating || docTicketsBusy}
+                  title="Create DOC Story under the linked Jira parent, with Confluence body as description"
+                  onClick={async () => {
+                    setDocTicketCreating(true);
+                    try {
+                      await onCreateDocTicket(page.id);
+                    } finally {
+                      setDocTicketCreating(false);
+                    }
+                  }}
+                >
+                  {docTicketCreating ? 'Creating DOC…' : 'Create DOC ticket'}
                 </button>
               )}
             </div>
@@ -3443,7 +3485,9 @@ const BulkActionsBar = ({
   onRefreshFromJira,
   refreshingJira,
   hasJiraTickets,
-  onExportToCursor
+  onExportToCursor,
+  onCreateDocTickets,
+  docTicketsCreating
 }) => {
   const { ai: canAi, export: canExport } = usePermissions();
   if (selectedCount === 0) return null;
@@ -3496,6 +3540,21 @@ const BulkActionsBar = ({
             title="Generate AI release notes for selected pages"
           >
             {batchAIGenerating ? 'Generating...' : 'Batch AI Generate'}
+          </button>
+        )}
+        {onCreateDocTickets && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={onCreateDocTickets}
+            disabled={docTicketsCreating || !hasJiraTickets}
+            title={
+              hasJiraTickets
+                ? 'Create a DOC ticket under each page’s linked Jira parent (one per selected page with a ticket)'
+                : 'Select pages that have a linked Jira ticket'
+            }
+          >
+            {docTicketsCreating ? 'Creating DOC…' : 'Create DOC ticket(s)'}
           </button>
         )}
         <button className="btn btn-secondary btn-sm" onClick={onClearSelection}>
@@ -4843,6 +4902,7 @@ function App() {
 
   const [bulkEditAction, setBulkEditAction] = useState(null);
   const [batchAIGenerating, setBatchAIGenerating] = useState(false);
+  const [docTicketsCreating, setDocTicketsCreating] = useState(false);
   const [batchAIResults, setBatchAIResults] = useState(null);
   const [batchSendToLaunchNotesLoading, setBatchSendToLaunchNotesLoading] = useState(false);
   const [aiSuggestions, setAiSuggestions] = useState(null);
@@ -4873,6 +4933,63 @@ function App() {
     setExportForClaudeInitialPageIds(Array.from(selectedPages, id => String(id)));
     setShowExportForClaudeModal(true);
   }, [perms.export, selectedPages]);
+
+  const handleCreateDocTickets = useCallback(
+    async (pageIds) => {
+      const ids = (Array.isArray(pageIds) ? pageIds : []).map(String).filter(Boolean);
+      if (ids.length === 0) return;
+      if (!hasCredentials()) {
+        addToast('Configure Atlassian credentials first.', 'error');
+        return;
+      }
+      if (ids.length > 1) {
+        const ok = window.confirm(
+          `Create DOC ticket(s) for ${ids.length} Confluence pages? Each page must have a parent Jira key in its body or title (same detection as the board).`
+        );
+        if (!ok) return;
+      }
+      setDocTicketsCreating(true);
+      try {
+        const response = await authenticatedFetch('/api/jira/create-doc-tickets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pageIds: ids })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          addToast(data.details || data.error || 'Failed to create DOC tickets', 'error');
+          return;
+        }
+        const results = data.results || [];
+        const created = results.filter((r) => r.ok);
+        const failed = results.filter((r) => !r.ok);
+        if (created.length > 0) {
+          const keys = created.map((r) => r.docKey).filter(Boolean).join(', ');
+          addToast(`Created ${created.length} DOC ticket(s): ${keys}`, 'success');
+          logActivity('jira_update', 'Created DOC ticket(s) from release notes', {
+            count: created.length,
+            docKeys: created.map((r) => r.docKey).filter(Boolean),
+            parentKeys: created.map((r) => r.parentKey).filter(Boolean)
+          });
+        }
+        if (failed.length > 0) {
+          const msg = failed
+            .map((f) => f.error || 'Unknown error')
+            .slice(0, 2)
+            .join('; ');
+          addToast(`${failed.length} failed: ${msg}`, 'error');
+        }
+        if (created.length === 0 && failed.length === 0) {
+          addToast('No tickets created.', 'info');
+        }
+      } catch (e) {
+        addToast(e.message || 'Failed to create DOC tickets', 'error');
+      } finally {
+        setDocTicketsCreating(false);
+      }
+    },
+    [addToast]
+  );
 
   const handleAddToLaunchNotes = useCallback((pages) => {
     if (!perms.launchnotes) {
@@ -5678,6 +5795,10 @@ function App() {
               refreshingJira={refreshingJira}
               hasJiraTickets={Array.from(selectedPages).some(id => pages.find(p => p.id === id)?.jiraTicket)}
               onExportToCursor={handleBulkExportToCursor}
+              onCreateDocTickets={() =>
+                handleCreateDocTickets(Array.from(selectedPages, (id) => String(id)))
+              }
+              docTicketsCreating={docTicketsCreating}
             />
 
             {error && (
@@ -5977,6 +6098,8 @@ function App() {
               return next;
             });
           }}
+          onCreateDocTicket={(pageId) => handleCreateDocTickets([pageId])}
+          docTicketsBusy={docTicketsCreating}
           addToast={addToast}
         />
       )}

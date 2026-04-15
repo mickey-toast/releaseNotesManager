@@ -2268,6 +2268,164 @@ app.post('/api/jira/issue/:issueKey/comment', async (req, res) => {
   }
 });
 
+const DOC_TICKET_PROJECT_KEY = process.env.RELEASENOTES_DOC_PROJECT_KEY || 'DOC';
+
+/** Plain text → minimal Jira Cloud ADF for issue description. */
+function plainTextToJiraDescriptionAdf(rawText) {
+  const maxTotal = 24000;
+  let t = String(rawText || '').trim();
+  if (!t) t = '(No Confluence body captured)';
+  if (t.length > maxTotal) {
+    t = `${t.slice(0, maxTotal)}\n\n… (truncated for Jira size limit)`;
+  }
+  const paragraphs = t
+    .split(/\n{2,}/)
+    .map((s) => s.replace(/\n+/g, ' ').trim())
+    .filter(Boolean);
+  const blocks = (paragraphs.length ? paragraphs : ['(empty)']).map((text) => ({
+    type: 'paragraph',
+    content: [{ type: 'text', text: text.length > 8000 ? `${text.slice(0, 8000)}…` : text }]
+  }));
+  return { type: 'doc', version: 1, content: blocks };
+}
+
+/**
+ * Create DOC project issue under parent Jira (Story first; Sub-task if Jira rejects hierarchy).
+ * POST body: { pageIds: string[] } — max 25; each page must resolve a parent key from Confluence body/title.
+ */
+app.post('/api/jira/create-doc-tickets', async (req, res) => {
+  try {
+    const credentials = getCredentialsFromRequest(req);
+    if (!credentials || !credentials.email || !credentials.token) {
+      return res.status(401).json({ error: 'Atlassian credentials required' });
+    }
+    const rawIds = Array.isArray(req.body?.pageIds) ? req.body.pageIds : [];
+    const pageIds = [...new Set(rawIds.map(String).filter(Boolean))].slice(0, 25);
+    if (pageIds.length === 0) {
+      return res.status(400).json({ error: 'pageIds must be a non-empty array' });
+    }
+
+    const { confluenceApi, jiraApi: userJiraApi } = createApiClients(credentials);
+    const jiraBaseUrl = credentials.baseUrl.replace(/\/wiki\/?$/, '');
+
+    let myself;
+    try {
+      const meRes = await userJiraApi.get('/rest/api/3/myself');
+      myself = meRes.data;
+    } catch (e) {
+      return res.status(401).json({
+        error: 'Could not load Jira profile',
+        details: e.response?.data?.message || e.message
+      });
+    }
+    const accountId = myself.accountId;
+    if (!accountId) {
+      return res.status(500).json({ error: 'Jira /myself returned no accountId' });
+    }
+
+    const results = [];
+
+    for (const pageId of pageIds) {
+      try {
+        const currentPage = await confluenceApi.get(`/rest/api/content/${pageId}`, {
+          params: { expand: 'body.storage,title' }
+        });
+        const bodyContent = currentPage.data.body?.storage?.value || '';
+        const pageTitle = currentPage.data.title || '';
+        const parentKey =
+          extractJiraTicket(bodyContent) || extractJiraTicketFromTitle(pageTitle);
+        if (!parentKey) {
+          results.push({
+            pageId,
+            ok: false,
+            error: 'No Jira parent key found on this Confluence page (body or title)'
+          });
+          continue;
+        }
+
+        const bodyText = convertConfluenceToText(bodyContent);
+        const descriptionAdf = plainTextToJiraDescriptionAdf(bodyText);
+        const summary = `RELNOTE - ${parentKey}`;
+
+        const baseFields = {
+          project: { key: DOC_TICKET_PROJECT_KEY },
+          summary,
+          description: descriptionAdf,
+          parent: { key: parentKey },
+          assignee: { accountId }
+        };
+
+        const attempts = [
+          ['Story', true],
+          ['Story', false],
+          ['Sub-task', true],
+          ['Sub-task', false]
+        ];
+        let created = null;
+        let issueTypeUsed = null;
+        let lastErr = null;
+        for (const [typeName, useReporter] of attempts) {
+          const fields = {
+            ...baseFields,
+            issuetype: { name: typeName }
+          };
+          if (useReporter) {
+            fields.reporter = { accountId };
+          }
+          try {
+            const issueRes = await userJiraApi.post('/rest/api/3/issue', { fields });
+            created = issueRes.data;
+            issueTypeUsed = typeName;
+            break;
+          } catch (err) {
+            lastErr = err;
+          }
+        }
+        if (!created) {
+          const msg =
+            lastErr?.response?.data?.errors &&
+            Object.keys(lastErr.response.data.errors).length
+              ? JSON.stringify(lastErr.response.data.errors)
+              : lastErr?.response?.data?.errorMessages?.join('; ') ||
+                lastErr?.message ||
+                'Create failed';
+          results.push({ pageId, ok: false, parentKey, error: msg });
+          continue;
+        }
+
+        const key = created.key;
+        results.push({
+          pageId,
+          ok: true,
+          parentKey,
+          docKey: key,
+          jiraUrl: key ? `${jiraBaseUrl}/browse/${key}` : null,
+          issueTypeUsed
+        });
+      } catch (err) {
+        results.push({
+          pageId,
+          ok: false,
+          error: err.response?.data?.message || err.message || 'Request failed'
+        });
+      }
+    }
+
+    const okCount = results.filter((r) => r.ok).length;
+    res.json({
+      ok: okCount > 0 || results.every((r) => r.ok),
+      results,
+      summary: { created: okCount, failed: results.length - okCount }
+    });
+  } catch (error) {
+    console.error('Error in create-doc-tickets:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to create DOC tickets',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
 // Get current user information
 app.get('/api/user/current', async (req, res) => {
   try {
