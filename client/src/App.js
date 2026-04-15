@@ -401,7 +401,7 @@ const PageDetailPanel = ({
                   type="button"
                   className="quick-action-btn"
                   disabled={docTicketCreating || docTicketsBusy}
-                  title="Create DOC Story under the linked Jira parent, with Confluence body as description"
+                  title="Create a DOC Story with Confluence body as description, and link it (Relates) to the page’s reference Jira issue"
                   onClick={async () => {
                     setDocTicketCreating(true);
                     try {
@@ -3550,7 +3550,7 @@ const BulkActionsBar = ({
             disabled={docTicketsCreating || !hasJiraTickets}
             title={
               hasJiraTickets
-                ? 'Create a DOC ticket under each page’s linked Jira parent (one per selected page with a ticket)'
+                ? 'Create a DOC Story per page and link it (Relates) to each page’s reference Jira issue'
                 : 'Select pages that have a linked Jira ticket'
             }
           >
@@ -4944,7 +4944,7 @@ function App() {
       }
       if (ids.length > 1) {
         const ok = window.confirm(
-          `Create DOC ticket(s) for ${ids.length} Confluence pages? Each page must have a parent Jira key in its body or title (same detection as the board).`
+          `Create DOC ticket(s) for ${ids.length} Confluence pages? Each page needs a reference Jira key in its body or title; a DOC Story is created and linked with “Relates” to that issue.`
         );
         if (!ok) return;
       }
@@ -4966,10 +4966,21 @@ function App() {
         if (created.length > 0) {
           const keys = created.map((r) => r.docKey).filter(Boolean).join(', ');
           addToast(`Created ${created.length} DOC ticket(s): ${keys}`, 'success');
+          const linkProblems = created.filter((r) => r.relatedLinkOk === false && r.linkError);
+          if (linkProblems.length > 0) {
+            addToast(
+              `${linkProblems.length} ticket(s) created but Jira “relates” link failed: ${linkProblems
+                .map((r) => r.linkError)
+                .slice(0, 2)
+                .join('; ')}`,
+              'warning'
+            );
+          }
           logActivity('jira_update', 'Created DOC ticket(s) from release notes', {
             count: created.length,
             docKeys: created.map((r) => r.docKey).filter(Boolean),
-            parentKeys: created.map((r) => r.parentKey).filter(Boolean)
+            referenceKeys: created.map((r) => r.referenceKey || r.parentKey).filter(Boolean),
+            relatedLinkOk: created.map((r) => r.relatedLinkOk)
           });
         }
         if (failed.length > 0) {

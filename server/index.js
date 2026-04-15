@@ -2290,8 +2290,42 @@ function plainTextToJiraDescriptionAdf(rawText) {
 }
 
 /**
- * Create DOC project issue under parent Jira (Story first; Sub-task if Jira rejects hierarchy).
- * POST body: { pageIds: string[] } — max 25; each page must resolve a parent key from Confluence body/title.
+ * Link DOC issue ↔ reference Jira issue (cross-project). Tries common "Relates" type names and inward/outward order.
+ */
+async function postJiraRelatesLink(jiraApi, docKey, referenceKey) {
+  const configured = process.env.RELEASENOTES_DOC_RELATES_LINK_TYPE;
+  const typeCandidates = configured
+    ? configured.split(',').map((s) => s.trim()).filter(Boolean)
+    : ['Relates', 'Relates to', 'Relates To', 'Related'];
+  const orders = [
+    { inwardIssue: { key: docKey }, outwardIssue: { key: referenceKey } },
+    { inwardIssue: { key: referenceKey }, outwardIssue: { key: docKey } }
+  ];
+  let lastErr = null;
+  for (const linkName of typeCandidates) {
+    for (const sides of orders) {
+      try {
+        await jiraApi.post('/rest/api/3/issueLink', {
+          type: { name: linkName },
+          ...sides
+        });
+        return { ok: true, linkType: linkName };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+  }
+  const msg =
+    lastErr?.response?.data?.errorMessages?.join('; ') ||
+    (lastErr?.response?.data?.errors && JSON.stringify(lastErr.response.data.errors)) ||
+    lastErr?.message ||
+    'Link failed';
+  return { ok: false, error: typeof msg === 'string' ? msg : String(msg) };
+}
+
+/**
+ * Create DOC Story from release note page; link to reference Jira (e.g. CPPL-462) with "Relates" (no parent — cross-project safe).
+ * POST body: { pageIds: string[] } — max 25; each page must resolve a reference issue key from Confluence body/title.
  */
 app.post('/api/jira/create-doc-tickets', async (req, res) => {
   try {
@@ -2332,34 +2366,31 @@ app.post('/api/jira/create-doc-tickets', async (req, res) => {
         });
         const bodyContent = currentPage.data.body?.storage?.value || '';
         const pageTitle = currentPage.data.title || '';
-        const parentKey =
+        const referenceKey =
           extractJiraTicket(bodyContent) || extractJiraTicketFromTitle(pageTitle);
-        if (!parentKey) {
+        if (!referenceKey) {
           results.push({
             pageId,
             ok: false,
-            error: 'No Jira parent key found on this Confluence page (body or title)'
+            error: 'No Jira reference key found on this Confluence page (body or title)'
           });
           continue;
         }
 
         const bodyText = convertConfluenceToText(bodyContent);
         const descriptionAdf = plainTextToJiraDescriptionAdf(bodyText);
-        const summary = `RELNOTE - ${parentKey}`;
+        const summary = `RELNOTE - ${referenceKey}`;
 
         const baseFields = {
           project: { key: DOC_TICKET_PROJECT_KEY },
           summary,
           description: descriptionAdf,
-          parent: { key: parentKey },
           assignee: { accountId }
         };
 
         const attempts = [
           ['Story', true],
-          ['Story', false],
-          ['Sub-task', true],
-          ['Sub-task', false]
+          ['Story', false]
         ];
         let created = null;
         let issueTypeUsed = null;
@@ -2389,18 +2420,23 @@ app.post('/api/jira/create-doc-tickets', async (req, res) => {
               : lastErr?.response?.data?.errorMessages?.join('; ') ||
                 lastErr?.message ||
                 'Create failed';
-          results.push({ pageId, ok: false, parentKey, error: msg });
+          results.push({ pageId, ok: false, referenceKey, error: msg });
           continue;
         }
 
         const key = created.key;
+        const linkResult = await postJiraRelatesLink(userJiraApi, key, referenceKey);
         results.push({
           pageId,
           ok: true,
-          parentKey,
+          referenceKey,
+          parentKey: referenceKey,
           docKey: key,
           jiraUrl: key ? `${jiraBaseUrl}/browse/${key}` : null,
-          issueTypeUsed
+          issueTypeUsed,
+          relatedLinkOk: linkResult.ok,
+          relatedLinkType: linkResult.ok ? linkResult.linkType : undefined,
+          linkError: linkResult.ok ? undefined : linkResult.error
         });
       } catch (err) {
         results.push({
