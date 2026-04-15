@@ -28,6 +28,7 @@ const {
   normalizeRulesList,
   trimDeliveryLog
 } = require('./notificationRulesEngine');
+const { confluenceStorageHtmlToJiraAdf } = require('./confluenceHtmlToJiraAdf');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -2289,38 +2290,108 @@ function plainTextToJiraDescriptionAdf(rawText) {
   return { type: 'doc', version: 1, content: blocks };
 }
 
+function scoreRelatesLikeLinkType(lt) {
+  const name = (lt.name || '').toLowerCase();
+  const inward = (lt.inward || '').toLowerCase();
+  const outward = (lt.outward || '').toLowerCase();
+  if (name === 'relates') return 100;
+  if (name === 'relates to' || name === 'related') return 95;
+  if (/relat/.test(name)) return 88;
+  if (/relat/.test(inward) || /relat/.test(outward)) return 75;
+  return 0;
+}
+
 /**
- * Link DOC issue ↔ reference Jira issue (cross-project). Tries common "Relates" type names and inward/outward order.
+ * Link DOC issue ↔ reference Jira issue (cross-project).
+ * Uses GET /rest/api/3/issueLinkType so we send the exact `id` Jira expects (names differ per site).
+ * Jira requires "Link issues" on the outward issue's project — we try both inward/outward orderings.
+ * @see https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-links/#api-rest-api-3-issuelink-post
  */
-async function postJiraRelatesLink(jiraApi, docKey, referenceKey) {
+async function postJiraRelatesLink(jiraApi, docKey, referenceKey, preloadedLinkTypes = null) {
+  let allTypes = preloadedLinkTypes;
+  if (!Array.isArray(allTypes) || allTypes.length === 0) {
+    try {
+      const listRes = await jiraApi.get('/rest/api/3/issueLinkType');
+      allTypes = listRes.data?.issueLinkTypes || [];
+    } catch (e) {
+      return {
+        ok: false,
+        error: `Could not list issue link types: ${e.response?.data?.errorMessages?.join('; ') || e.message}`
+      };
+    }
+  }
+
   const configured = process.env.RELEASENOTES_DOC_RELATES_LINK_TYPE;
-  const typeCandidates = configured
-    ? configured.split(',').map((s) => s.trim()).filter(Boolean)
-    : ['Relates', 'Relates to', 'Relates To', 'Related'];
+  let orderedTypes = [];
+  if (configured) {
+    const wanted = configured.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const w of wanted) {
+      const wl = w.toLowerCase();
+      const found = allTypes.find(
+        (t) =>
+          String(t.id) === w ||
+          (t.name && t.name.toLowerCase() === wl) ||
+          (t.name && t.name.toLowerCase().includes(wl))
+      );
+      if (found && !orderedTypes.find((x) => x.id === found.id)) orderedTypes.push(found);
+    }
+  }
+  if (orderedTypes.length === 0) {
+    const ranked = [...allTypes]
+      .map((t) => ({ t, s: scoreRelatesLikeLinkType(t) }))
+      .filter((x) => x.s > 0)
+      .sort((a, b) => b.s - a.s)
+      .map((x) => x.t);
+    orderedTypes = ranked;
+  }
+  if (orderedTypes.length === 0) {
+    const names = allTypes.map((t) => t.name).filter(Boolean);
+    return {
+      ok: false,
+      error: `No relates-like issue link type found on this Jira site. Available types: ${names.join(', ') || '(none)'}. Set RELEASENOTES_DOC_RELATES_LINK_TYPE to the exact type name or numeric id.`
+    };
+  }
+
   const orders = [
     { inwardIssue: { key: docKey }, outwardIssue: { key: referenceKey } },
     { inwardIssue: { key: referenceKey }, outwardIssue: { key: docKey } }
   ];
+
+  const typePayloadsFor = (lt) => {
+    const out = [];
+    if (lt.id != null && lt.id !== '') out.push({ id: String(lt.id) });
+    if (lt.name) out.push({ name: lt.name });
+    return out;
+  };
+
   let lastErr = null;
-  for (const linkName of typeCandidates) {
-    for (const sides of orders) {
-      try {
-        await jiraApi.post('/rest/api/3/issueLink', {
-          type: { name: linkName },
-          ...sides
-        });
-        return { ok: true, linkType: linkName };
-      } catch (err) {
-        lastErr = err;
+  for (const lt of orderedTypes) {
+    for (const typePayload of typePayloadsFor(lt)) {
+      for (const sides of orders) {
+        try {
+          await jiraApi.post('/rest/api/3/issueLink', {
+            type: typePayload,
+            ...sides
+          });
+          return { ok: true, linkType: lt.name, linkTypeId: lt.id != null ? String(lt.id) : undefined };
+        } catch (err) {
+          lastErr = err;
+        }
       }
     }
   }
+
+  const names = allTypes.map((t) => t.name).filter(Boolean);
   const msg =
     lastErr?.response?.data?.errorMessages?.join('; ') ||
     (lastErr?.response?.data?.errors && JSON.stringify(lastErr.response.data.errors)) ||
     lastErr?.message ||
     'Link failed';
-  return { ok: false, error: typeof msg === 'string' ? msg : String(msg) };
+  const hint =
+    names.length > 0
+      ? ` Known link types on this site: ${names.slice(0, 25).join(', ')}${names.length > 25 ? '…' : ''}. Set RELEASENOTES_DOC_RELATES_LINK_TYPE to an exact name or id if needed.`
+      : '';
+  return { ok: false, error: (typeof msg === 'string' ? msg : String(msg)) + hint };
 }
 
 /**
@@ -2357,6 +2428,14 @@ app.post('/api/jira/create-doc-tickets', async (req, res) => {
       return res.status(500).json({ error: 'Jira /myself returned no accountId' });
     }
 
+    let issueLinkTypes = null;
+    try {
+      const ltRes = await userJiraApi.get('/rest/api/3/issueLinkType');
+      issueLinkTypes = ltRes.data?.issueLinkTypes || [];
+    } catch (e) {
+      console.warn('[create-doc-tickets] Could not prefetch issue link types:', e.message);
+    }
+
     const results = [];
 
     for (const pageId of pageIds) {
@@ -2377,8 +2456,13 @@ app.post('/api/jira/create-doc-tickets', async (req, res) => {
           continue;
         }
 
-        const bodyText = convertConfluenceToText(bodyContent);
-        const descriptionAdf = plainTextToJiraDescriptionAdf(bodyText);
+        let descriptionAdf;
+        try {
+          descriptionAdf = confluenceStorageHtmlToJiraAdf(bodyContent);
+        } catch (convErr) {
+          console.warn('[create-doc-tickets] Rich ADF from Confluence HTML failed, using plain text:', convErr.message);
+          descriptionAdf = plainTextToJiraDescriptionAdf(convertConfluenceToText(bodyContent));
+        }
         const summary = `RELNOTE - ${referenceKey}`;
 
         const baseFields = {
@@ -2425,7 +2509,7 @@ app.post('/api/jira/create-doc-tickets', async (req, res) => {
         }
 
         const key = created.key;
-        const linkResult = await postJiraRelatesLink(userJiraApi, key, referenceKey);
+        const linkResult = await postJiraRelatesLink(userJiraApi, key, referenceKey, issueLinkTypes);
         results.push({
           pageId,
           ok: true,

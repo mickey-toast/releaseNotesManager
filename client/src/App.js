@@ -4966,11 +4966,11 @@ function App() {
         if (created.length > 0) {
           const keys = created.map((r) => r.docKey).filter(Boolean).join(', ');
           addToast(`Created ${created.length} DOC ticket(s): ${keys}`, 'success');
-          const linkProblems = created.filter((r) => r.relatedLinkOk === false && r.linkError);
+          const linkProblems = created.filter((r) => r.relatedLinkOk === false);
           if (linkProblems.length > 0) {
             addToast(
-              `${linkProblems.length} ticket(s) created but Jira “relates” link failed: ${linkProblems
-                .map((r) => r.linkError)
+              `${linkProblems.length} ticket(s) created but the Jira “relates” link step failed: ${linkProblems
+                .map((r) => r.linkError || 'unknown')
                 .slice(0, 2)
                 .join('; ')}`,
               'warning'
