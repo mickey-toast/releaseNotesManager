@@ -4,6 +4,7 @@ import SettingsModal from './SettingsModal';
 import ExportForClaudeModal from './ExportForClaudeModal';
 import AIHub from './AIHub';
 import ActivityLogModal from './ActivityLogModal';
+import FeatureFlagsView from './FeatureFlagsView';
 import { authenticatedFetch, getAuthHeaders, getAppAuthHeaders, hasCredentials, getCredentials, shouldShowField, getDebugLogs, clearDebugLogs } from './api';
 import { signOutApp, isSupabaseAuthConfigured } from './supabaseClient';
 import { hydrateSettingsFromCloud, saveSettingsProfileToCloud } from './cloudProfile';
@@ -5504,6 +5505,19 @@ function App() {
             <span className="tab-name">My Tasks</span>
             {myTasks.length > 0 && <span className="tab-count">{myTasks.length}</span>}
           </button>
+          <button
+            type="button"
+            className={`sidebar-nav-item view-tab ${currentView === 'featureFlags' ? 'active' : ''}`}
+            onClick={() => {
+              setCurrentView('featureFlags');
+              setSearchTerm('');
+              setAuthorFilter('');
+              setFixVersionFilter('');
+              collapseSidebarOnNavigate();
+            }}
+          >
+            <span className="tab-name">Feature Flags</span>
+          </button>
           {(!perms.loaded || perms.ai) && (
             <button
               type="button"
@@ -5685,7 +5699,7 @@ function App() {
       )}
 
         {currentView === 'aiHub' ? (
-          <AIHub 
+          <AIHub
             pages={allPagesForAI}
             statuses={statuses}
             onRefresh={fetchAllPagesForAI}
@@ -5704,6 +5718,8 @@ function App() {
             unassignPageFromMe={unassignPageFromMe}
             onAddToLaunchNotes={handleAddToLaunchNotes}
           />
+        ) : currentView === 'featureFlags' ? (
+          <FeatureFlagsView config={config} />
         ) : (
           <>
             <div className="controls-bar">

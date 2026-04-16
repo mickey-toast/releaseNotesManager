@@ -17,6 +17,7 @@ const userProfileRoutes = require('./userProfileRoutes');
 const auditLogRoutes = require('./auditLogRoutes');
 const meRoutes = require('./meRoutes');
 const adminRoutes = require('./adminRoutes');
+const featureFlagsRoutes = require('./featureFlagsRoutes');
 const { requirePermission } = require('./permissionMiddleware');
 const {
   launchRawFromPage,
@@ -44,6 +45,7 @@ app.use('/api', userProfileRoutes);
 app.use('/api', auditLogRoutes);
 app.use('/api', meRoutes);
 app.use('/api', adminRoutes);
+app.use('/api', featureFlagsRoutes);
 
 // Page statuses configuration
 const PAGE_STATUSES = {

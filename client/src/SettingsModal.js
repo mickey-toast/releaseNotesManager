@@ -64,6 +64,7 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
     launchnotesApiKey: initialSettings?.launchnotesApiKey || '',
     launchnotesProjectId: initialSettings?.launchnotesProjectId || 'pro_EtBG4hh8w3LBq',
     launchnotesUseSandbox: initialSettings?.launchnotesUseSandbox || false,
+    launchdarklyApiKey: initialSettings?.launchdarklyApiKey || '',
     aiProvider: initialSettings?.aiProvider || 'gemini',
     aiApiKey: initialSettings?.aiApiKey || ''
   });
@@ -560,6 +561,18 @@ const SettingsModal = ({ onSave, onCancel, initialSettings, onRefreshStyleGuide,
                     ) : (
                       'Required. Format: pro_XXXXX. You can find your Project ID in your LaunchNotes project settings or URL.'
                     )}
+                  </small>
+                </div>
+                <div className="settings-field">
+                  <label>LaunchDarkly API Key</label>
+                  <input
+                    type="password"
+                    value={settings.launchdarklyApiKey}
+                    onChange={(e) => handleChange('launchdarklyApiKey', e.target.value)}
+                    placeholder="api-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+                  />
+                  <small>
+                    Optional. Required for Feature Flags dashboard view. Get your personal API key from LaunchDarkly Account Settings → Authorization.
                   </small>
                 </div>
               </div>
