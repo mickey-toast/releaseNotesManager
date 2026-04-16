@@ -6085,3 +6085,35 @@ nav.status-tabs + .controls-bar {
   color: var(--text-muted);
   font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
 }
+
+/* VREL column */
+.vrel-cell {
+  min-width: 100px;
+  max-width: 120px;
+}
+
+.vrel-input {
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.vrel-input:hover {
+  border-color: var(--accent-primary);
+}
+
+.vrel-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.vrel-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.6;
+}

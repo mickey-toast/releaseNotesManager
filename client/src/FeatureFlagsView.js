@@ -10,6 +10,15 @@ const FeatureFlagsView = ({ config }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [vrelData, setVrelData] = useState(() => {
+    // Load VREL data from localStorage
+    try {
+      const saved = localStorage.getItem('featureFlagsVrel');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
 
   const fetchFlags = async (forceRefresh = false) => {
     console.log('[FeatureFlags] Starting fetch...', { forceRefresh, hasConfig: !!config });
@@ -80,6 +89,17 @@ const FeatureFlagsView = ({ config }) => {
     fetchFlags(true);
   };
 
+  const handleVrelChange = (flagKey, value) => {
+    const newVrelData = { ...vrelData, [flagKey]: value };
+    setVrelData(newVrelData);
+    // Save to localStorage
+    try {
+      localStorage.setItem('featureFlagsVrel', JSON.stringify(newVrelData));
+    } catch (err) {
+      console.error('Failed to save VREL data:', err);
+    }
+  };
+
   // Filter and search
   const filteredFlags = useMemo(() => {
     let result = flags;
@@ -103,12 +123,14 @@ const FeatureFlagsView = ({ config }) => {
     // Search filter
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
-      result = result.filter(flag =>
-        flag.flagKey.toLowerCase().includes(term) ||
-        flag.jpdKey.toLowerCase().includes(term) ||
-        flag.jpdSummary.toLowerCase().includes(term) ||
-        flag.releaseVersion.toLowerCase().includes(term)
-      );
+      result = result.filter(flag => {
+        const vrel = vrelData[flag.flagKey] || '';
+        return flag.flagKey.toLowerCase().includes(term) ||
+          flag.jpdKey.toLowerCase().includes(term) ||
+          flag.jpdSummary.toLowerCase().includes(term) ||
+          flag.releaseVersion.toLowerCase().includes(term) ||
+          vrel.toLowerCase().includes(term);
+      });
     }
 
     // Sort
@@ -135,7 +157,7 @@ const FeatureFlagsView = ({ config }) => {
     }
 
     return result;
-  }, [flags, showMissingOnly, filterMode, searchTerm, sortConfig]);
+  }, [flags, showMissingOnly, filterMode, searchTerm, sortConfig, vrelData]);
 
   const handleSort = (key) => {
     setSortConfig(prev => ({
@@ -321,6 +343,7 @@ const FeatureFlagsView = ({ config }) => {
                 JPD{renderSortIcon('jpdKey')}
               </th>
               <th>JPD Summary</th>
+              <th>VREL</th>
             </tr>
           </thead>
           <tbody>
@@ -403,11 +426,21 @@ const FeatureFlagsView = ({ config }) => {
                     {flag.jpdSummary}
                   </span>
                 </td>
+                <td className="vrel-cell">
+                  <input
+                    type="text"
+                    className="vrel-input"
+                    value={vrelData[flag.flagKey] || ''}
+                    onChange={(e) => handleVrelChange(flag.flagKey, e.target.value)}
+                    placeholder="e.g. 2"
+                    title="Virtual Release - manually entered"
+                  />
+                </td>
               </tr>
             ))}
             {filteredFlags.length === 0 && (
               <tr>
-                <td colSpan="7" className="empty-state">
+                <td colSpan="8" className="empty-state">
                   {showMissingOnly
                     ? 'No flags missing release notes! 🎉'
                     : 'No flags found.'}
