@@ -168,7 +168,7 @@ const BulkSubmitView = ({ standalone = false }) => {
         <div className="bulk-submit-header">
           <h2>Bulk Submit JPDs</h2>
           <p className="bulk-submit-description">
-            Paste Jira issue URLs or keys (one per line or comma-separated) to submit them for review. The system will automatically find the linked Confluence pages.
+            Paste Jira issue URLs or keys (one per line or comma-separated) to submit them for review. The system will automatically find the linked Confluence pages. Questions about the release notes process? Head over to #toast-release-notes on Slack and ask away!
           </p>
         </div>
       )}
