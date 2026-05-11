@@ -3616,7 +3616,7 @@ function App() {
   );
   const [bulkSubmitStandalone, setBulkSubmitStandalone] = useState(() =>
     typeof window !== 'undefined' &&
-    window.location.hash === '#/bulk-submit-jpds'
+    (window.location.hash === '#/bulk-submit-jpds' || window.location.pathname === '/bulk-submit-jpds')
   );
 
   useEffect(() => {
@@ -3625,11 +3625,15 @@ function App() {
         window.location.hash === '#/admin' || (window.location.hash || '').startsWith('#/admin')
       );
       setBulkSubmitStandalone(
-        window.location.hash === '#/bulk-submit-jpds'
+        window.location.hash === '#/bulk-submit-jpds' || window.location.pathname === '/bulk-submit-jpds'
       );
     };
     window.addEventListener('hashchange', onHash);
-    return () => window.removeEventListener('hashchange', onHash);
+    window.addEventListener('popstate', onHash); // Handle back/forward navigation
+    return () => {
+      window.removeEventListener('hashchange', onHash);
+      window.removeEventListener('popstate', onHash);
+    };
   }, []);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
