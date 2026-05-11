@@ -6552,6 +6552,17 @@ nav.status-tabs + .controls-bar {
   background: #dc2626;
 }
 
+.btn-info {
+  background: var(--accent-primary);
+  color: white;
+  border: 1px solid var(--accent-primary);
+}
+
+.btn-info:hover {
+  background: #5558e3;
+  border-color: #5558e3;
+}
+
 .review-queue-table-container {
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);

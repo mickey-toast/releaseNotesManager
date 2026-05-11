@@ -2257,21 +2257,29 @@ app.get('/api/review-queue', async (req, res) => {
       return res.status(500).json({ error: 'Supabase not configured' });
     }
 
-    // Count items with status "To Do" or "Under Review"
-    const { count, error } = await supabase
+    const { status } = req.query;
+
+    let query = supabase
       .from('jpd_review_queue')
-      .select('*', { count: 'exact', head: true })
-      .in('status', ['To Do', 'Under Review']);
+      .select('*')
+      .order('submitted_at', { ascending: false });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       throw error;
     }
 
-    res.json({ count: count || 0 });
+    console.log(`[Review Queue] Returning ${data?.length || 0} items`);
+    res.json({ items: data || [] });
   } catch (error) {
-    console.error('Error fetching review queue count:', error.message);
+    console.error('Error fetching review queue:', error.message);
     res.status(500).json({
-      error: 'Failed to fetch review queue count',
+      error: 'Failed to fetch review queue',
       details: error.message
     });
   }
@@ -2373,6 +2381,154 @@ app.put('/api/review-queue/:id', requireAdmin, async (req, res) => {
     console.error('Error updating review queue item:', error.message);
     res.status(500).json({
       error: 'Failed to update review queue item',
+      details: error.message
+    });
+  }
+});
+
+// Re-check Confluence pages for review queue items
+app.post('/api/review-queue/recheck-confluence', async (req, res) => {
+  try {
+    const { ids } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array is required' });
+    }
+
+    const supabase = getServiceClient();
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi, jiraApi } = createApiClients(credentials);
+
+    const results = {
+      updated: [],
+      unchanged: [],
+      failed: []
+    };
+
+    for (const id of ids) {
+      try {
+        // Get the review item
+        const { data: item, error: fetchError } = await supabase
+          .from('jpd_review_queue')
+          .select('*')
+          .eq('id', id)
+          .single();
+
+        if (fetchError || !item) {
+          results.failed.push({ id, error: 'Item not found' });
+          continue;
+        }
+
+        // Skip if already has a page
+        if (item.page_id) {
+          results.unchanged.push({ id, jiraKey: item.jira_key, reason: 'Already has Confluence page' });
+          continue;
+        }
+
+        console.log(`[Re-check] Checking ${item.jira_key} for Confluence page...`);
+
+        let confluencePageId = null;
+        let confluencePageUrl = null;
+        let confluencePageTitle = null;
+
+        try {
+          // Get all remote links for this Jira issue
+          const issueLinksResponse = await jiraApi.get(`/rest/api/3/issue/${item.jira_key}/remotelink`);
+          const remoteLinks = issueLinksResponse.data || [];
+
+          // Find Confluence link
+          for (const link of remoteLinks) {
+            const url = link.object?.url || '';
+            if (url.includes('/wiki/') && url.includes('/pages/')) {
+              const match = url.match(/\/pages\/(\d+)/);
+              if (match) {
+                confluencePageId = match[1];
+                confluencePageUrl = url;
+                confluencePageTitle = link.object?.title || null;
+                break;
+              }
+            }
+          }
+
+          // If no remote link, check issue fields
+          if (!confluencePageId) {
+            const issueWithAllFields = await jiraApi.get(`/rest/api/3/issue/${item.jira_key}`);
+            const fields = issueWithAllFields.data.fields || {};
+
+            for (const [key, value] of Object.entries(fields)) {
+              if (value && typeof value === 'string' && value.includes('/wiki/pages/')) {
+                const match = value.match(/\/pages\/(\d+)/);
+                if (match) {
+                  confluencePageId = match[1];
+                  const baseUrl = credentials.baseUrl || 'https://toasttab.atlassian.net/wiki';
+                  confluencePageUrl = `${baseUrl}/pages/${confluencePageId}`;
+                  break;
+                }
+              }
+            }
+          }
+        } catch (linkError) {
+          console.warn(`[Re-check] Error fetching links for ${item.jira_key}:`, linkError.message);
+        }
+
+        if (!confluencePageId) {
+          results.unchanged.push({ id, jiraKey: item.jira_key, reason: 'No Confluence page found' });
+          continue;
+        }
+
+        // Fetch page title if not set
+        if (!confluencePageTitle) {
+          try {
+            const pageResponse = await confluenceApi.get(`/rest/api/content/${confluencePageId}`, {
+              params: { expand: 'version' }
+            });
+            confluencePageTitle = pageResponse.data.title;
+          } catch (err) {
+            console.warn(`Could not fetch title for page ${confluencePageId}:`, err.message);
+            confluencePageTitle = item.page_title || item.jira_key;
+          }
+        }
+
+        // Update the review queue item
+        const { error: updateError } = await supabase
+          .from('jpd_review_queue')
+          .update({
+            page_id: confluencePageId,
+            page_url: confluencePageUrl,
+            page_title: confluencePageTitle
+          })
+          .eq('id', id);
+
+        if (updateError) {
+          throw updateError;
+        }
+
+        console.log(`[Re-check] Found page ${confluencePageId} for ${item.jira_key}`);
+        results.updated.push({
+          id,
+          jiraKey: item.jira_key,
+          pageId: confluencePageId,
+          pageTitle: confluencePageTitle
+        });
+      } catch (error) {
+        console.error(`[Re-check] Error processing ${id}:`, error);
+        results.failed.push({ id, error: error.message || 'Unknown error' });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Re-checked ${ids.length} item${ids.length !== 1 ? 's' : ''}. Found ${results.updated.length} new page${results.updated.length !== 1 ? 's' : ''}.`,
+      results
+    });
+  } catch (error) {
+    console.error('Error in re-check confluence:', error.message);
+    res.status(500).json({
+      error: 'Failed to re-check Confluence pages',
       details: error.message
     });
   }

@@ -5,6 +5,7 @@ import { usePermissions } from './permissionsContext';
 const ReviewQueueView = ({ onCountChange }) => {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [rechecking, setRechecking] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [statusFilter, setStatusFilter] = useState('all');
   const [error, setError] = useState(null);
@@ -131,6 +132,42 @@ const ReviewQueueView = ({ onCountChange }) => {
     }
   };
 
+  const handleRecheckConfluence = async () => {
+    if (selectedIds.size === 0) {
+      alert('Please select items to re-check');
+      return;
+    }
+
+    setRechecking(true);
+    try {
+      const response = await authenticatedFetch('/api/review-queue/recheck-confluence', {
+        method: 'POST',
+        body: JSON.stringify({ ids: Array.from(selectedIds) })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to re-check Confluence pages');
+      }
+
+      const data = await response.json();
+
+      // Refresh the list to show updated items
+      await fetchReviewQueue();
+
+      // Clear selection
+      setSelectedIds(new Set());
+
+      // Show results
+      const message = `${data.results.updated.length} page${data.results.updated.length !== 1 ? 's' : ''} found and updated.\n${data.results.unchanged.length} item${data.results.unchanged.length !== 1 ? 's' : ''} unchanged.${data.results.failed.length > 0 ? `\n${data.results.failed.length} failed.` : ''}`;
+      alert(message);
+    } catch (err) {
+      console.error('Error re-checking Confluence pages:', err);
+      alert('Failed to re-check Confluence pages: ' + err.message);
+    } finally {
+      setRechecking(false);
+    }
+  };
+
   const handleSelectAll = (e) => {
     if (e.target.checked) {
       setSelectedIds(new Set(items.map(item => item.id)));
@@ -225,17 +262,33 @@ const ReviewQueueView = ({ onCountChange }) => {
         </button>
       </div>
 
-      {isAdmin && selectedIds.size > 0 && (
+      {selectedIds.size > 0 && (
         <div className="bulk-actions-bar">
           <span className="selected-count">
             {selectedIds.size} selected
           </span>
           <button
-            className="btn btn-danger"
-            onClick={handleBulkDelete}
+            className="btn btn-info"
+            onClick={handleRecheckConfluence}
+            disabled={rechecking}
+            title="Check if Confluence pages have been created for selected items"
           >
-            Delete Selected
+            {rechecking ? (
+              <>
+                <span className="spinner" /> Re-checking...
+              </>
+            ) : (
+              <>🔄 Re-check Confluence Pages</>
+            )}
           </button>
+          {isAdmin && (
+            <button
+              className="btn btn-danger"
+              onClick={handleBulkDelete}
+            >
+              Delete Selected
+            </button>
+          )}
           <button
             className="btn btn-secondary"
             onClick={() => setSelectedIds(new Set())}
@@ -260,16 +313,14 @@ const ReviewQueueView = ({ onCountChange }) => {
           <table className="review-queue-table">
             <thead>
               <tr>
-                {isAdmin && (
-                  <th className="checkbox-column">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.size === items.length && items.length > 0}
-                      onChange={handleSelectAll}
-                      title="Select all"
-                    />
-                  </th>
-                )}
+                <th className="checkbox-column">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.size === items.length && items.length > 0}
+                    onChange={handleSelectAll}
+                    title="Select all"
+                  />
+                </th>
                 <th>Jira Issue</th>
                 <th>Confluence Page</th>
                 <th>Reporter</th>
@@ -281,15 +332,13 @@ const ReviewQueueView = ({ onCountChange }) => {
             <tbody>
               {items.map((item) => (
                 <tr key={item.id} className={selectedIds.has(item.id) ? 'selected' : ''}>
-                  {isAdmin && (
-                    <td className="checkbox-column">
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(item.id)}
-                        onChange={() => handleSelectItem(item.id)}
-                      />
-                    </td>
-                  )}
+                  <td className="checkbox-column">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(item.id)}
+                      onChange={() => handleSelectItem(item.id)}
+                    />
+                  </td>
                   <td className="jira-cell">
                     <a
                       href={item.jira_url}
