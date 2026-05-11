@@ -14,6 +14,7 @@ const ReviewQueueView = ({ onCountChange }) => {
 
   useEffect(() => {
     fetchReviewQueue();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter]);
 
   const fetchReviewQueue = async () => {
@@ -25,16 +26,23 @@ const ReviewQueueView = ({ onCountChange }) => {
         ? '/api/review-queue'
         : `/api/review-queue?status=${encodeURIComponent(statusFilter)}`;
 
+      console.log('[ReviewQueue] Fetching from:', url);
       const response = await authenticatedFetch(url);
 
+      console.log('[ReviewQueue] Response status:', response.status);
+
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error('[ReviewQueue] Error response:', errorText);
         throw new Error('Failed to fetch review queue');
       }
 
       const data = await response.json();
+      console.log('[ReviewQueue] Received data:', data);
+      console.log('[ReviewQueue] Items count:', data.items?.length || 0);
       setItems(data.items || []);
     } catch (err) {
-      console.error('Error fetching review queue:', err);
+      console.error('[ReviewQueue] Error fetching review queue:', err);
       setError(err.message);
     } finally {
       setLoading(false);
