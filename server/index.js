@@ -11,6 +11,7 @@ const AdmZip = require('adm-zip');
 const multer = require('multer');
 const { marked } = require('marked');
 const { requireSupabaseAuth } = require('./authMiddleware');
+const { getServiceClient } = require('./supabaseServiceClient');
 
 marked.use({ gfm: true, breaks: false });
 const userProfileRoutes = require('./userProfileRoutes');
@@ -1974,6 +1975,419 @@ app.post('/api/pages/bulk-move', async (req, res) => {
     console.error('Error bulk moving pages:', error.message);
     res.status(500).json({
       error: 'Failed to bulk move pages',
+      details: error.message
+    });
+  }
+});
+
+// ==================== Review Queue Endpoints ====================
+
+// Helper to check if user is admin
+async function requireAdmin(req, res, next) {
+  try {
+    const { createUserSupabaseClient, cloudProfileEnabled } = require('./supabaseUserClient');
+    const { buildPermissionsForUser } = require('./userPermissions');
+
+    if (!cloudProfileEnabled() || !req.appUser?.id) {
+      // If cloud profile is disabled, allow (for local dev)
+      return next();
+    }
+
+    const sb = createUserSupabaseClient(req);
+    const perms = await buildPermissionsForUser(sb, req.appUser.id);
+
+    if (!perms.isAdmin) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        details: 'This action requires admin privileges'
+      });
+    }
+
+    next();
+  } catch (err) {
+    console.error('[requireAdmin]', err);
+    return res.status(500).json({ error: 'Permission check failed', details: err.message });
+  }
+}
+
+// Check for duplicate JPD submissions
+app.post('/api/review-queue/check-duplicate', async (req, res) => {
+  try {
+    const { jiraKeys } = req.body;
+    const supabase = getServiceClient();
+
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    if (!Array.isArray(jiraKeys) || jiraKeys.length === 0) {
+      return res.status(400).json({ error: 'jiraKeys array is required' });
+    }
+
+    // Check for existing entries by Jira key
+    const { data, error } = await supabase
+      .from('jpd_review_queue')
+      .select('jira_key, reporter_email, submitted_at')
+      .in('jira_key', jiraKeys);
+
+    if (error) {
+      console.error('Error checking duplicates:', error);
+      return res.status(500).json({ error: 'Failed to check for duplicates' });
+    }
+
+    const duplicates = {};
+    if (data) {
+      data.forEach(item => {
+        duplicates[item.jira_key] = {
+          reporter: item.reporter_email,
+          submittedAt: item.submitted_at
+        };
+      });
+    }
+
+    res.json({ duplicates });
+  } catch (error) {
+    console.error('Error in duplicate check:', error.message);
+    res.status(500).json({ error: 'Failed to check for duplicates', details: error.message });
+  }
+});
+
+// Submit JPD pages to review queue
+app.post('/api/review-queue/submit', async (req, res) => {
+  try {
+    const { jiraKeys, force = false } = req.body;
+
+    if (!Array.isArray(jiraKeys) || jiraKeys.length === 0) {
+      return res.status(400).json({ error: 'jiraKeys array is required' });
+    }
+
+    const supabase = getServiceClient();
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi, jiraApi } = createApiClients(credentials);
+
+    // Get user email from Supabase auth
+    const submitterEmail = req.appUser?.email || 'unknown';
+    const submitterName = req.appUser?.name || submitterEmail;
+
+    const results = {
+      successful: [],
+      failed: []
+    };
+
+    for (const jiraKey of jiraKeys) {
+      try {
+        console.log(`[Review Queue] Processing ${jiraKey}...`);
+
+        // Fetch the Jira issue to get linked Confluence page
+        const jiraResponse = await jiraApi.get(`/rest/api/3/issue/${jiraKey}`, {
+          params: {
+            fields: 'summary',
+            expand: 'renderedFields'
+          }
+        });
+
+        const jiraIssue = jiraResponse.data;
+        const jiraSummary = jiraIssue.fields?.summary || jiraKey;
+        const jiraUrl = `${credentials.jiraBaseUrl || 'https://toasttab.atlassian.net'}/browse/${jiraKey}`;
+
+        console.log(`[Review Queue] Fetched Jira issue: ${jiraSummary}`);
+
+        // Look for Confluence links in the issue
+        // Check issue links for Confluence pages
+        let confluencePageId = null;
+        let confluencePageUrl = null;
+        let confluencePageTitle = null;
+
+        try {
+          // Get all issue links
+          console.log(`[Review Queue] Fetching remote links for ${jiraKey}...`);
+          const issueLinksResponse = await jiraApi.get(`/rest/api/3/issue/${jiraKey}/remotelink`);
+          const remoteLinks = issueLinksResponse.data || [];
+
+          console.log(`[Review Queue] Found ${remoteLinks.length} remote link(s)`);
+
+          // Find Confluence link
+          for (const link of remoteLinks) {
+            const url = link.object?.url || '';
+            console.log(`[Review Queue] Checking link: ${url}`);
+
+            if (url.includes('/wiki/') && url.includes('/pages/')) {
+              const match = url.match(/\/pages\/(\d+)/);
+              if (match) {
+                confluencePageId = match[1];
+                confluencePageUrl = url;
+                confluencePageTitle = link.object?.title || null;
+                console.log(`[Review Queue] Found Confluence page via remote link: ${confluencePageId}`);
+                break;
+              }
+            }
+          }
+
+          // If no remote link found, check for "Confluence Pages" in the issue
+          if (!confluencePageId) {
+            console.log(`[Review Queue] No remote link found, checking issue fields...`);
+
+            // Try to fetch from Confluence Pages field if it exists
+            const issueWithAllFields = await jiraApi.get(`/rest/api/3/issue/${jiraKey}`);
+            const fields = issueWithAllFields.data.fields || {};
+
+            // Look for any field that might contain Confluence page references
+            for (const [key, value] of Object.entries(fields)) {
+              if (value && typeof value === 'string' && value.includes('/wiki/pages/')) {
+                const match = value.match(/\/pages\/(\d+)/);
+                if (match) {
+                  confluencePageId = match[1];
+                  const baseUrl = credentials.baseUrl || 'https://toasttab.atlassian.net/wiki';
+                  confluencePageUrl = `${baseUrl}/pages/${confluencePageId}`;
+                  console.log(`[Review Queue] Found Confluence page in field ${key}: ${confluencePageId}`);
+                  break;
+                }
+              }
+            }
+          }
+        } catch (linkError) {
+          console.error(`[Review Queue] Error fetching links for ${jiraKey}:`, linkError.response?.data || linkError.message);
+        }
+
+        if (!confluencePageId) {
+          console.warn(`[Review Queue] No Confluence page found for ${jiraKey} - adding anyway`);
+        } else {
+          // Fetch Confluence page title if not already set
+          if (!confluencePageTitle) {
+            try {
+              const pageResponse = await confluenceApi.get(`/rest/api/content/${confluencePageId}`, {
+                params: { expand: 'version' }
+              });
+              confluencePageTitle = pageResponse.data.title;
+            } catch (err) {
+              console.warn(`Could not fetch title for page ${confluencePageId}:`, err.message);
+              confluencePageTitle = jiraSummary;
+            }
+          }
+        }
+
+        // Insert into review queue (with or without Confluence page)
+        const { data, error } = await supabase
+          .from('jpd_review_queue')
+          .insert({
+            jira_key: jiraKey,
+            jira_url: jiraUrl,
+            page_id: confluencePageId,
+            page_url: confluencePageUrl,
+            page_title: confluencePageTitle || jiraSummary,
+            reporter_email: submitterEmail,
+            reporter_name: submitterName,
+            status: 'To Do'
+          })
+          .select()
+          .single();
+
+        if (error) {
+          throw error;
+        }
+
+        results.successful.push({
+          jiraKey,
+          pageId: confluencePageId,
+          pageTitle: confluencePageTitle,
+          id: data.id
+        });
+      } catch (error) {
+        console.error(`Error submitting ${jiraKey}:`, error);
+        results.failed.push({
+          jiraKey,
+          error: error.message || 'Unknown error'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully submitted ${results.successful.length} of ${jiraKeys.length} JPD${jiraKeys.length !== 1 ? 's' : ''} for review`,
+      submitter: submitterEmail,
+      successful: results.successful,
+      failed: results.failed
+    });
+  } catch (error) {
+    console.error('Error in review queue submit:', error.message);
+    res.status(500).json({
+      error: 'Failed to submit to review queue',
+      details: error.message
+    });
+  }
+});
+
+// Get all review queue items
+app.get('/api/review-queue', async (req, res) => {
+  try {
+    const supabase = getServiceClient();
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    const { status } = req.query;
+
+    let query = supabase
+      .from('jpd_review_queue')
+      .select('*')
+      .order('submitted_at', { ascending: false });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      throw error;
+    }
+
+    res.json({ items: data || [] });
+  } catch (error) {
+    console.error('Error fetching review queue:', error.message);
+    res.status(500).json({
+      error: 'Failed to fetch review queue',
+      details: error.message
+    });
+  }
+});
+
+// Update review queue item (admin only)
+app.put('/api/review-queue/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, notes } = req.body;
+
+    const supabase = getServiceClient();
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    const updates = {};
+    if (status) updates.status = status;
+    if (notes !== undefined) updates.notes = notes;
+
+    // If marking as Published, move the Confluence page (if it exists)
+    if (status === 'Published') {
+      // First get the review item to know which page to move
+      const { data: reviewItem, error: fetchError } = await supabase
+        .from('jpd_review_queue')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      if (fetchError || !reviewItem) {
+        return res.status(404).json({ error: 'Review item not found' });
+      }
+
+      // Move the Confluence page to Published status (only if page exists)
+      if (reviewItem.page_id) {
+        try {
+          const credentials = getCredentialsFromRequest(req);
+          const { confluenceApi } = createApiClients(credentials);
+
+          const publishedStatusConfig = PAGE_STATUSES['published'];
+          if (publishedStatusConfig) {
+            const currentPage = await confluenceApi.get(`/rest/api/content/${reviewItem.page_id}`, {
+              params: { expand: 'version,body.storage' }
+            });
+
+            await confluenceApi.put(`/rest/api/content/${reviewItem.page_id}`, {
+              id: reviewItem.page_id,
+              type: 'page',
+              title: currentPage.data.title,
+              version: {
+                number: currentPage.data.version.number + 1,
+                message: 'Moved to Published from Review Queue'
+              },
+              ancestors: [{
+                id: publishedStatusConfig.pageId
+              }],
+              body: currentPage.data.body
+            });
+          }
+        } catch (confluenceError) {
+          console.error('Error moving page to Published:', confluenceError.message);
+          // Continue anyway to update the review queue status
+        }
+      } else {
+        console.log(`[Review Queue] Item ${id} has no Confluence page, skipping move to Published`);
+      }
+
+      // Delete from review queue after publishing
+      const { error: deleteError } = await supabase
+        .from('jpd_review_queue')
+        .delete()
+        .eq('id', id);
+
+      if (deleteError) {
+        throw deleteError;
+      }
+
+      return res.json({
+        success: true,
+        message: 'Page published and removed from review queue',
+        deleted: true
+      });
+    }
+
+    // Regular status update
+    const { data, error } = await supabase
+      .from('jpd_review_queue')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    res.json({ success: true, item: data });
+  } catch (error) {
+    console.error('Error updating review queue item:', error.message);
+    res.status(500).json({
+      error: 'Failed to update review queue item',
+      details: error.message
+    });
+  }
+});
+
+// Bulk delete review queue items (admin only)
+app.post('/api/review-queue/bulk-delete', requireAdmin, async (req, res) => {
+  try {
+    const { ids } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array is required' });
+    }
+
+    const supabase = getServiceClient();
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    const { error } = await supabase
+      .from('jpd_review_queue')
+      .delete()
+      .in('id', ids);
+
+    if (error) {
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      message: `Deleted ${ids.length} item${ids.length !== 1 ? 's' : ''} from review queue`
+    });
+  } catch (error) {
+    console.error('Error bulk deleting from review queue:', error.message);
+    res.status(500).json({
+      error: 'Failed to bulk delete from review queue',
       details: error.message
     });
   }

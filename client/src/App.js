@@ -5,6 +5,8 @@ import ExportForClaudeModal from './ExportForClaudeModal';
 import AIHub from './AIHub';
 import ActivityLogModal from './ActivityLogModal';
 import FeatureFlagsView from './FeatureFlagsView';
+import BulkSubmitView from './BulkSubmitView';
+import ReviewQueueView from './ReviewQueueView';
 import { authenticatedFetch, getAuthHeaders, getAppAuthHeaders, hasCredentials, getCredentials, shouldShowField, getDebugLogs, clearDebugLogs } from './api';
 import { signOutApp, isSupabaseAuthConfigured } from './supabaseClient';
 import { hydrateSettingsFromCloud, saveSettingsProfileToCloud } from './cloudProfile';
@@ -3612,11 +3614,18 @@ function App() {
     typeof window !== 'undefined' &&
     (window.location.hash === '#/admin' || (window.location.hash || '').startsWith('#/admin'))
   );
+  const [bulkSubmitStandalone, setBulkSubmitStandalone] = useState(() =>
+    typeof window !== 'undefined' &&
+    window.location.hash === '#/bulk-submit-jpds'
+  );
 
   useEffect(() => {
     const onHash = () => {
       setAdminPortal(
         window.location.hash === '#/admin' || (window.location.hash || '').startsWith('#/admin')
+      );
+      setBulkSubmitStandalone(
+        window.location.hash === '#/bulk-submit-jpds'
       );
     };
     window.addEventListener('hashchange', onHash);
@@ -5423,6 +5432,14 @@ function App() {
     return () => clearInterval(interval);
   }, [checkStyleGuideStatus]);
 
+  if (bulkSubmitStandalone) {
+    return (
+      <div className="app">
+        <BulkSubmitView standalone={true} />
+      </div>
+    );
+  }
+
   if (adminPortal) {
     if (!perms.loaded) {
       return (
@@ -5504,6 +5521,32 @@ function App() {
           >
             <span className="tab-name">My Tasks</span>
             {myTasks.length > 0 && <span className="tab-count">{myTasks.length}</span>}
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav-item view-tab ${currentView === 'bulkSubmit' ? 'active' : ''}`}
+            onClick={() => {
+              setCurrentView('bulkSubmit');
+              setSearchTerm('');
+              setAuthorFilter('');
+              setFixVersionFilter('');
+              collapseSidebarOnNavigate();
+            }}
+          >
+            <span className="tab-name">Bulk Submit</span>
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav-item view-tab ${currentView === 'reviewQueue' ? 'active' : ''}`}
+            onClick={() => {
+              setCurrentView('reviewQueue');
+              setSearchTerm('');
+              setAuthorFilter('');
+              setFixVersionFilter('');
+              collapseSidebarOnNavigate();
+            }}
+          >
+            <span className="tab-name">Review Queue</span>
           </button>
           <button
             type="button"
@@ -5718,6 +5761,10 @@ function App() {
             unassignPageFromMe={unassignPageFromMe}
             onAddToLaunchNotes={handleAddToLaunchNotes}
           />
+        ) : currentView === 'bulkSubmit' ? (
+          <BulkSubmitView />
+        ) : currentView === 'reviewQueue' ? (
+          <ReviewQueueView />
         ) : currentView === 'featureFlags' ? (
           <FeatureFlagsView config={config} />
         ) : (
