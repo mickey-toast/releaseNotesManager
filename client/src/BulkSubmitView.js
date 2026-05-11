@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { authenticatedFetch } from './api';
 
-const BulkSubmitView = ({ standalone = false }) => {
+const BulkSubmitView = ({ standalone = false, onSubmitSuccess }) => {
   const [jpdLinks, setJpdLinks] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState(null);
@@ -128,6 +128,11 @@ const BulkSubmitView = ({ standalone = false }) => {
       const data = await response.json();
       setResults(data);
       setJpdLinks(''); // Clear the form on success
+
+      // Notify parent component to refresh count
+      if (onSubmitSuccess && data.successful && data.successful.length > 0) {
+        onSubmitSuccess();
+      }
     } catch (err) {
       setError(err.message || 'An error occurred while submitting');
       console.error('Bulk submit error:', err);

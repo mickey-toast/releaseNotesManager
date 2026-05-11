@@ -3682,6 +3682,7 @@ function App() {
   const [myTasksByStatus, setMyTasksByStatus] = useState({});
   const [allPagesForAI, setAllPagesForAI] = useState([]);
   const [allPagesLoading, setAllPagesLoading] = useState(false);
+  const [reviewQueueCount, setReviewQueueCount] = useState(0);
   const [assignedPageIds, setAssignedPageIds] = useState(() => {
     const saved = localStorage.getItem('assignedPageIds');
     return saved ? new Set(JSON.parse(saved)) : new Set();
@@ -4444,6 +4445,19 @@ function App() {
     }
   }, []); // No dependencies - reads from ref
 
+  const fetchReviewQueueCount = useCallback(async () => {
+    try {
+      const response = await authenticatedFetch('/api/review-queue/count');
+      if (response.ok) {
+        const data = await response.json();
+        setReviewQueueCount(data.count || 0);
+      }
+    } catch (err) {
+      console.error('Error fetching review queue count:', err);
+      // Don't show error to user, just fail silently
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -4452,7 +4466,7 @@ function App() {
       if (!hasCredentials()) {
         setShowSettings(true);
       }
-      await Promise.all([fetchConfig(), fetchStats(), fetchCurrentUser()]);
+      await Promise.all([fetchConfig(), fetchStats(), fetchCurrentUser(), fetchReviewQueueCount()]);
     })();
     return () => {
       cancelled = true;
@@ -4507,6 +4521,8 @@ function App() {
         } else if (currentView === 'myTasks') {
           fetchMyTasks();
         }
+        // Always refresh review queue count (lightweight query)
+        fetchReviewQueueCount();
         // Skip fetchStats here: it scans every Confluence status (same cost as a full dashboard pull).
         // Header stats update on load, manual refresh, and after moves. Reduces load on slow hosts (e.g. Render free).
         addToast('Auto-refreshed', 'info');
@@ -5543,10 +5559,12 @@ function App() {
               setSearchTerm('');
               setAuthorFilter('');
               setFixVersionFilter('');
+              fetchReviewQueueCount();
               collapseSidebarOnNavigate();
             }}
           >
             <span className="tab-name">Review Queue</span>
+            {reviewQueueCount > 0 && <span className="tab-count">{reviewQueueCount}</span>}
           </button>
           <button
             type="button"
@@ -5615,6 +5633,7 @@ function App() {
                 fetchAllPagesForAI();
               }
               fetchStats();
+              fetchReviewQueueCount();
               collapseSidebarOnNavigate();
             }}
             disabled={loading || myTasksLoading || allPagesLoading}
@@ -5762,9 +5781,9 @@ function App() {
             onAddToLaunchNotes={handleAddToLaunchNotes}
           />
         ) : currentView === 'bulkSubmit' ? (
-          <BulkSubmitView />
+          <BulkSubmitView onSubmitSuccess={fetchReviewQueueCount} />
         ) : currentView === 'reviewQueue' ? (
-          <ReviewQueueView />
+          <ReviewQueueView onCountChange={fetchReviewQueueCount} />
         ) : currentView === 'featureFlags' ? (
           <FeatureFlagsView config={config} />
         ) : (

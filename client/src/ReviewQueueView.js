@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { authenticatedFetch } from './api';
 import { usePermissions } from './permissionsContext';
 
-const ReviewQueueView = () => {
+const ReviewQueueView = ({ onCountChange }) => {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedIds, setSelectedIds] = useState(new Set());
@@ -73,6 +73,11 @@ const ReviewQueueView = () => {
           item.id === id ? { ...item, status: newStatus } : item
         ));
       }
+
+      // Notify parent to update count
+      if (onCountChange) {
+        onCountChange();
+      }
     } catch (err) {
       console.error('Error updating status:', err);
       alert('Failed to update status: ' + err.message);
@@ -107,6 +112,11 @@ const ReviewQueueView = () => {
       // Remove deleted items from list
       setItems(items.filter(item => !selectedIds.has(item.id)));
       setSelectedIds(new Set());
+
+      // Notify parent to update count
+      if (onCountChange) {
+        onCountChange();
+      }
     } catch (err) {
       console.error('Error deleting items:', err);
       alert('Failed to delete items: ' + err.message);

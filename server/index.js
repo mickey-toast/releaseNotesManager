@@ -2221,6 +2221,34 @@ app.post('/api/review-queue/submit', async (req, res) => {
   }
 });
 
+// Get review queue count (for sidebar badge)
+app.get('/api/review-queue/count', async (req, res) => {
+  try {
+    const supabase = getServiceClient();
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    // Count items with status "To Do" or "Under Review"
+    const { count, error } = await supabase
+      .from('jpd_review_queue')
+      .select('*', { count: 'exact', head: true })
+      .in('status', ['To Do', 'Under Review']);
+
+    if (error) {
+      throw error;
+    }
+
+    res.json({ count: count || 0 });
+  } catch (error) {
+    console.error('Error fetching review queue count:', error.message);
+    res.status(500).json({
+      error: 'Failed to fetch review queue count',
+      details: error.message
+    });
+  }
+});
+
 // Get all review queue items
 app.get('/api/review-queue', async (req, res) => {
   try {
@@ -2229,28 +2257,21 @@ app.get('/api/review-queue', async (req, res) => {
       return res.status(500).json({ error: 'Supabase not configured' });
     }
 
-    const { status } = req.query;
-
-    let query = supabase
+    // Count items with status "To Do" or "Under Review"
+    const { count, error } = await supabase
       .from('jpd_review_queue')
-      .select('*')
-      .order('submitted_at', { ascending: false });
-
-    if (status) {
-      query = query.eq('status', status);
-    }
-
-    const { data, error } = await query;
+      .select('*', { count: 'exact', head: true })
+      .in('status', ['To Do', 'Under Review']);
 
     if (error) {
       throw error;
     }
 
-    res.json({ items: data || [] });
+    res.json({ count: count || 0 });
   } catch (error) {
-    console.error('Error fetching review queue:', error.message);
+    console.error('Error fetching review queue count:', error.message);
     res.status(500).json({
-      error: 'Failed to fetch review queue',
+      error: 'Failed to fetch review queue count',
       details: error.message
     });
   }
