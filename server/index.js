@@ -2429,50 +2429,114 @@ app.post('/api/review-queue/recheck-confluence', async (req, res) => {
           continue;
         }
 
-        console.log(`[Re-check] Checking ${item.jira_key} for Confluence page...`);
+        console.log(`[Re-check] Searching Confluence pages for ${item.jira_key}...`);
 
         let confluencePageId = null;
         let confluencePageUrl = null;
         let confluencePageTitle = null;
 
         try {
-          // Get all remote links for this Jira issue
-          const issueLinksResponse = await jiraApi.get(`/rest/api/3/issue/${item.jira_key}/remotelink`);
-          const remoteLinks = issueLinksResponse.data || [];
+          // Use Confluence CQL search to find pages containing the Jira key
+          // This is more efficient than manually searching all pages
+          const cql = `text ~ "${item.jira_key}" OR title ~ "${item.jira_key}"`;
+          console.log(`[Re-check] Using CQL: ${cql}`);
 
-          // Find Confluence link
-          for (const link of remoteLinks) {
-            const url = link.object?.url || '';
-            if (url.includes('/wiki/') && url.includes('/pages/')) {
-              const match = url.match(/\/pages\/(\d+)/);
-              if (match) {
-                confluencePageId = match[1];
-                confluencePageUrl = url;
-                confluencePageTitle = link.object?.title || null;
-                break;
-              }
+          const searchResponse = await confluenceApi.get('/rest/api/content/search', {
+            params: {
+              cql: cql,
+              limit: 50,
+              expand: 'ancestors'
+            }
+          });
+
+          const results = searchResponse.data.results || [];
+          console.log(`[Re-check] CQL search found ${results.length} result(s)`);
+
+          // Filter to only pages that are children of our status parents
+          const statusPageIds = [
+            PAGE_STATUSES.draft.pageId,
+            PAGE_STATUSES.inProgress.pageId,
+            PAGE_STATUSES.needsAction.pageId,
+            PAGE_STATUSES.published.pageId,
+            PAGE_STATUSES.discard.pageId
+          ];
+
+          for (const page of results) {
+            // Check if this page is under one of our status parents
+            const ancestors = page.ancestors || [];
+            const isUnderStatusParent = ancestors.some(ancestor =>
+              statusPageIds.includes(ancestor.id)
+            );
+
+            if (isUnderStatusParent) {
+              confluencePageId = page.id;
+              confluencePageTitle = page.title;
+              const baseUrl = credentials.baseUrl || 'https://toasttab.atlassian.net/wiki';
+              confluencePageUrl = `${baseUrl}/pages/${page.id}`;
+              console.log(`[Re-check] Found page "${page.title}" (${page.id}) under status parent`);
+              break;
             }
           }
 
-          // If no remote link, check issue fields
-          if (!confluencePageId) {
-            const issueWithAllFields = await jiraApi.get(`/rest/api/3/issue/${item.jira_key}`);
-            const fields = issueWithAllFields.data.fields || {};
+          if (!confluencePageId && results.length > 0) {
+            console.log(`[Re-check] Found ${results.length} page(s) but none under status parents`);
+          }
+        } catch (searchError) {
+          console.warn(`[Re-check] CQL search failed, falling back to manual search:`, searchError.message);
 
-            for (const [key, value] of Object.entries(fields)) {
-              if (value && typeof value === 'string' && value.includes('/wiki/pages/')) {
-                const match = value.match(/\/pages\/(\d+)/);
-                if (match) {
-                  confluencePageId = match[1];
-                  const baseUrl = credentials.baseUrl || 'https://toasttab.atlassian.net/wiki';
-                  confluencePageUrl = `${baseUrl}/pages/${confluencePageId}`;
-                  break;
+          // Fallback: manually search each status parent's children
+          const statusPageIds = [
+            PAGE_STATUSES.draft.pageId,
+            PAGE_STATUSES.inProgress.pageId,
+            PAGE_STATUSES.needsAction.pageId,
+            PAGE_STATUSES.published.pageId,
+            PAGE_STATUSES.discard.pageId
+          ];
+
+          for (const parentPageId of statusPageIds) {
+            if (confluencePageId) break;
+
+            try {
+              // Get all child pages with pagination
+              let start = 0;
+              const limit = 100;
+              let hasMore = true;
+
+              while (hasMore && !confluencePageId) {
+                const childPagesResponse = await confluenceApi.get(`/rest/api/content/${parentPageId}/child/page`, {
+                  params: {
+                    start: start,
+                    limit: limit,
+                    expand: 'body.storage'
+                  }
+                });
+
+                const childPages = childPagesResponse.data.results || [];
+                console.log(`[Re-check] Checking ${childPages.length} pages under parent ${parentPageId} (start: ${start})`);
+
+                // Search each page title and body
+                for (const page of childPages) {
+                  const pageTitle = page.title || '';
+                  const pageBody = page.body?.storage?.value || '';
+
+                  // Look in both title and body for the Jira key
+                  if (pageTitle.includes(item.jira_key) || pageBody.includes(item.jira_key)) {
+                    confluencePageId = page.id;
+                    confluencePageTitle = page.title;
+                    const baseUrl = credentials.baseUrl || 'https://toasttab.atlassian.net/wiki';
+                    confluencePageUrl = `${baseUrl}/pages/${page.id}`;
+                    console.log(`[Re-check] Found match in page "${page.title}" (${page.id})`);
+                    break;
+                  }
                 }
+
+                hasMore = childPages.length === limit;
+                start += limit;
               }
+            } catch (childError) {
+              console.warn(`[Re-check] Error searching under parent ${parentPageId}:`, childError.message);
             }
           }
-        } catch (linkError) {
-          console.warn(`[Re-check] Error fetching links for ${item.jira_key}:`, linkError.message);
         }
 
         if (!confluencePageId) {
