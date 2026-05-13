@@ -684,7 +684,7 @@ const PageDetailPanel = ({
 };
 
 // Overflow menu component
-const OverflowMenu = ({ page, statuses, currentStatus, onMove, onViewComments, isAssigned, onAssign, onUnassign, onAddToLaunchNotes }) => {
+const OverflowMenu = ({ page, statuses, currentStatus, onMove, onViewComments, isAssigned, onAssign, onUnassign, onAddToLaunchNotes, onMarkAsDuplicate }) => {
   const { launchnotes: canLn } = usePermissions();
   const [isOpen, setIsOpen] = useState(false);
   const [dropdownStyle, setDropdownStyle] = useState({});
@@ -803,12 +803,27 @@ const OverflowMenu = ({ page, statuses, currentStatus, onMove, onViewComments, i
                 </button>
               </>
             )}
+            {onMarkAsDuplicate && (
+              <>
+                <div className="overflow-divider" />
+                <button
+                  onClick={() => {
+                    onMarkAsDuplicate(page);
+                    setIsOpen(false);
+                  }}
+                  className="duplicate-option"
+                  title="Mark as duplicate and move to Discarded"
+                >
+                  Mark as Duplicate
+                </button>
+              </>
+            )}
             <div className="overflow-divider" />
             <div className="overflow-label">Move to...</div>
             {Object.entries(statuses).map(([key, status]) => (
               key !== currentStatus && (
-                <button 
-                  key={key} 
+                <button
+                  key={key}
                   onClick={() => handleMove(key)}
                   className="move-option"
                 >
@@ -3490,7 +3505,8 @@ const BulkActionsBar = ({
   hasJiraTickets,
   onExportToCursor,
   onCreateDocTickets,
-  docTicketsCreating
+  docTicketsCreating,
+  onMarkAsDuplicate
 }) => {
   const { ai: canAi, export: canExport } = usePermissions();
   if (selectedCount === 0) return null;
@@ -3553,11 +3569,21 @@ const BulkActionsBar = ({
             disabled={docTicketsCreating || !hasJiraTickets}
             title={
               hasJiraTickets
-                ? 'Create a DOC Story per page and link it (Relates) to each page’s reference Jira issue'
-                : 'Select pages that have a linked Jira ticket'
+                ? ‘Create a DOC Story per page and link it (Relates) to each page’s reference Jira issue’
+                : ‘Select pages that have a linked Jira ticket’
             }
           >
-            {docTicketsCreating ? 'Creating DOC…' : 'Create DOC ticket(s)'}
+            {docTicketsCreating ? ‘Creating DOC…’ : ‘Create DOC ticket(s)’}
+          </button>
+        )}
+        {onMarkAsDuplicate && (
+          <button
+            type="button"
+            className="btn btn-warning btn-sm"
+            onClick={onMarkAsDuplicate}
+            title="Mark selected pages as duplicates and move to Discarded"
+          >
+            Mark as Duplicate
           </button>
         )}
         <button className="btn btn-secondary btn-sm" onClick={onClearSelection}>
@@ -4103,6 +4129,79 @@ function App() {
       setActionLoading(false);
     }
   }, [addToast, fetchPages, fetchStats, currentStatus, statuses]);
+
+  const handleMarkAsDuplicate = useCallback(async (page) => {
+    if (!window.confirm(`Mark "${page.title}" as duplicate?\n\nThis will:\n- Move the page to DISCARDED status\n- Add a comment: "This page is a duplicate and has been discarded. For help with this page, Send a message to #toast-release-notes."`)) {
+      return;
+    }
+
+    setActionLoading(true);
+    try {
+      const response = await authenticatedFetch(`/api/pages/${page.id}/mark-duplicate`, {
+        method: 'POST'
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.details || 'Failed to mark as duplicate');
+      }
+
+      const result = await response.json();
+
+      logActivity('page_duplicate', 'Marked as duplicate', { pageTitle: page.title, jiraTicket: page.jiraTicket });
+      addToast(result.message, 'success');
+      fetchPages();
+      fetchStats();
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [addToast, fetchPages, fetchStats]);
+
+  const handleBulkMarkAsDuplicate = useCallback(async (pageIds) => {
+    if (pageIds.length === 0) {
+      addToast('Please select pages to mark as duplicate', 'info');
+      return;
+    }
+
+    if (!window.confirm(`Mark ${pageIds.length} page${pageIds.length !== 1 ? 's' : ''} as duplicate?\n\nThis will:\n- Move pages to DISCARDED status\n- Add duplicate comments to each page`)) {
+      return;
+    }
+
+    setActionLoading(true);
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const pageId of pageIds) {
+      try {
+        const response = await authenticatedFetch(`/api/pages/${pageId}/mark-duplicate`, {
+          method: 'POST'
+        });
+
+        if (response.ok) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch (err) {
+        console.error(`Error marking page ${pageId} as duplicate:`, err);
+        failCount++;
+      }
+    }
+
+    setActionLoading(false);
+
+    const message = `${successCount} page${successCount !== 1 ? 's' : ''} marked as duplicate.${failCount > 0 ? ` ${failCount} failed.` : ''}`;
+    addToast(message, successCount > 0 ? 'success' : 'error');
+
+    if (successCount > 0) {
+      logActivity('page_duplicate_bulk', 'Marked pages as duplicates (bulk)', { count: successCount });
+      fetchPages();
+      fetchStats();
+      setSelectedPages(new Set());
+    }
+  }, [addToast, fetchPages, fetchStats]);
 
   const executeBulkEdit = useCallback(async (targetStatus, pageIds, jiraComment = null, confluenceComment = null, labels = null) => {
     // Track previous statuses for undo - use pages state instead of sortedPages
@@ -5880,7 +5979,7 @@ function App() {
               </div>
             </div>
 
-            <BulkActionsBar 
+            <BulkActionsBar
               selectedCount={selectedPages.size}
               onEdit={handleBulkEdit}
               onClearSelection={() => setSelectedPages(new Set())}
@@ -5896,6 +5995,7 @@ function App() {
                 handleCreateDocTickets(Array.from(selectedPages, (id) => String(id)))
               }
               docTicketsCreating={docTicketsCreating}
+              onMarkAsDuplicate={selectedPages.size > 0 ? () => handleBulkMarkAsDuplicate(Array.from(selectedPages)) : undefined}
             />
 
             {error && (
@@ -6122,7 +6222,7 @@ function App() {
                           )}
                         </td>
                         <td className="col-actions">
-                          <OverflowMenu 
+                          <OverflowMenu
                             page={page}
                             statuses={statuses}
                             currentStatus={currentStatus}
@@ -6132,6 +6232,7 @@ function App() {
                             onAssign={assignPageToMe}
                             onUnassign={unassignPageFromMe}
                             onAddToLaunchNotes={handleAddToLaunchNotes}
+                            onMarkAsDuplicate={handleMarkAsDuplicate}
                           />
                         </td>
                         <td className="col-drag-handle">

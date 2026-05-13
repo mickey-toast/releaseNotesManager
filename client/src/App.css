@@ -1271,6 +1271,15 @@ nav.status-tabs + .controls-bar {
   background: var(--bg-tertiary);
 }
 
+.overflow-dropdown .duplicate-option {
+  color: #f59e0b;
+}
+
+.overflow-dropdown .duplicate-option:hover {
+  background: rgba(245, 158, 11, 0.1);
+  color: #d97706;
+}
+
 .overflow-divider {
   height: 1px;
   background: var(--border-subtle);
