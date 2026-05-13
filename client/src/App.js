@@ -3569,7 +3569,7 @@ const BulkActionsBar = ({
             disabled={docTicketsCreating || !hasJiraTickets}
             title={
               hasJiraTickets
-                ? ‘Create a DOC Story per page and link it (Relates) to each page’s reference Jira issue’
+                ? ‘Create a DOC Story per page and link it (Relates) to each page\’s reference Jira issue’
                 : ‘Select pages that have a linked Jira ticket’
             }
           >
