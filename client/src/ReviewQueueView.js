@@ -168,6 +168,98 @@ const ReviewQueueView = ({ onCountChange }) => {
     }
   };
 
+  const handleMarkAsDuplicate = async (item) => {
+    if (!item.page_id) {
+      alert('No Confluence page found for this item. Use "Re-check Confluence Pages" first.');
+      return;
+    }
+
+    if (!window.confirm(`Mark "${item.page_title || item.jira_key}" as duplicate?\n\nThis will:\n- Move the page to DISCARDED status\n- Add a comment: "This page is a duplicate and has been discarded. For help with this page, Send a message to #toast-release-notes."`)) {
+      return;
+    }
+
+    try {
+      const response = await authenticatedFetch(`/api/pages/${item.page_id}/mark-duplicate`, {
+        method: 'POST'
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to mark as duplicate');
+      }
+
+      // Remove item from queue after successful duplicate marking
+      setItems(items.filter(i => i.id !== item.id));
+      setSelectedIds(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(item.id);
+        return newSet;
+      });
+
+      // Notify parent to update count
+      if (onCountChange) {
+        onCountChange();
+      }
+
+      alert('Page marked as duplicate and moved to Discarded');
+    } catch (err) {
+      console.error('Error marking as duplicate:', err);
+      alert('Failed to mark as duplicate: ' + err.message);
+    }
+  };
+
+  const handleBulkMarkAsDuplicate = async () => {
+    if (selectedIds.size === 0) {
+      alert('Please select items to mark as duplicate');
+      return;
+    }
+
+    // Filter selected items to only those with page_id
+    const selectedItems = items.filter(item => selectedIds.has(item.id));
+    const itemsWithPages = selectedItems.filter(item => item.page_id);
+
+    if (itemsWithPages.length === 0) {
+      alert('None of the selected items have a Confluence page. Use "Re-check Confluence Pages" first.');
+      return;
+    }
+
+    if (!window.confirm(`Mark ${itemsWithPages.length} selected item${itemsWithPages.length !== 1 ? 's' : ''} as duplicate?\n\nThis will:\n- Move pages to DISCARDED status\n- Add duplicate comments to each page`)) {
+      return;
+    }
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const item of itemsWithPages) {
+      try {
+        const response = await authenticatedFetch(`/api/pages/${item.page_id}/mark-duplicate`, {
+          method: 'POST'
+        });
+
+        if (response.ok) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch (err) {
+        console.error(`Error marking ${item.jira_key} as duplicate:`, err);
+        failCount++;
+      }
+    }
+
+    // Refresh the list
+    await fetchReviewQueue();
+    setSelectedIds(new Set());
+
+    // Show results
+    const message = `${successCount} page${successCount !== 1 ? 's' : ''} marked as duplicate.${failCount > 0 ? `\n${failCount} failed.` : ''}`;
+    alert(message);
+
+    // Notify parent to update count
+    if (onCountChange) {
+      onCountChange();
+    }
+  };
+
   const handleSelectAll = (e) => {
     if (e.target.checked) {
       setSelectedIds(new Set(items.map(item => item.id)));
@@ -282,12 +374,21 @@ const ReviewQueueView = ({ onCountChange }) => {
             )}
           </button>
           {isAdmin && (
-            <button
-              className="btn btn-danger"
-              onClick={handleBulkDelete}
-            >
-              Delete Selected
-            </button>
+            <>
+              <button
+                className="btn btn-warning"
+                onClick={handleBulkMarkAsDuplicate}
+                title="Mark selected pages as duplicates and move to Discarded"
+              >
+                Mark as Duplicate
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={handleBulkDelete}
+              >
+                Delete Selected
+              </button>
+            </>
           )}
           <button
             className="btn btn-secondary"
@@ -390,15 +491,26 @@ const ReviewQueueView = ({ onCountChange }) => {
                     )}
                   </td>
                   <td className="actions-cell">
-                    <a
-                      href={item.page_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn btn-sm btn-secondary"
-                      title="View in Confluence"
-                    >
-                      View
-                    </a>
+                    {item.page_url && (
+                      <a
+                        href={item.page_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn btn-sm btn-secondary"
+                        title="View in Confluence"
+                      >
+                        View
+                      </a>
+                    )}
+                    {isAdmin && item.page_id && (
+                      <button
+                        className="btn btn-sm btn-warning"
+                        onClick={() => handleMarkAsDuplicate(item)}
+                        title="Mark as duplicate and move to Discarded"
+                      >
+                        Duplicate
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

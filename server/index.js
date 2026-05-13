@@ -1497,6 +1497,73 @@ app.post('/api/pages/:pageId/move', async (req, res) => {
   }
 });
 
+// Mark a page as duplicate - moves to DISCARDED and adds comment
+app.post('/api/pages/:pageId/mark-duplicate', async (req, res) => {
+  try {
+    const { pageId } = req.params;
+
+    // Get credentials and create API clients
+    const credentials = getCredentialsFromRequest(req);
+    const { confluenceApi } = createApiClients(credentials);
+
+    // Get the current page
+    const currentPage = await confluenceApi.get(`/rest/api/content/${pageId}`, {
+      params: {
+        expand: 'version,body.storage,ancestors'
+      }
+    });
+
+    const discardStatusConfig = PAGE_STATUSES.discard;
+
+    // Move the page to DISCARDED by updating its ancestors
+    await confluenceApi.put(`/rest/api/content/${pageId}`, {
+      id: pageId,
+      type: 'page',
+      title: currentPage.data.title,
+      version: {
+        number: currentPage.data.version.number + 1
+      },
+      ancestors: [{
+        id: discardStatusConfig.pageId
+      }],
+      body: currentPage.data.body
+    });
+
+    // Add comment to the Confluence page
+    const commentBody = 'This page is a duplicate and has been discarded. For help with this page, Send a message to #toast-release-notes.';
+    const commentPayload = {
+      type: 'comment',
+      container: {
+        id: pageId,
+        type: 'page'
+      },
+      body: {
+        storage: {
+          value: commentBody,
+          representation: 'storage'
+        }
+      }
+    };
+
+    await confluenceApi.post(`/rest/api/content`, commentPayload);
+
+    res.json({
+      success: true,
+      message: `Page "${currentPage.data.title}" marked as duplicate and moved to Discarded`,
+      page: {
+        id: pageId,
+        title: currentPage.data.title
+      }
+    });
+  } catch (error) {
+    console.error('Error marking page as duplicate:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: 'Failed to mark page as duplicate',
+      details: error.response?.data?.message || error.message
+    });
+  }
+});
+
 // Helper function to parse mentions in text and convert to Jira ADF format
 function parseMentionsToADF(text, mentions) {
   const parts = [];

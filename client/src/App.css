@@ -6563,6 +6563,17 @@ nav.status-tabs + .controls-bar {
   border-color: #5558e3;
 }
 
+.btn-warning {
+  background: #f59e0b;
+  color: white;
+  border: 1px solid #d97706;
+}
+
+.btn-warning:hover:not(:disabled) {
+  background: #d97706;
+  border-color: #b45309;
+}
+
 .review-queue-table-container {
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
@@ -6718,8 +6729,21 @@ nav.status-tabs + .controls-bar {
 }
 
 .actions-cell {
-  width: 100px;
+  min-width: 120px;
   text-align: center;
+  white-space: nowrap;
+}
+
+.actions-cell > * {
+  margin: 0 4px;
+}
+
+.actions-cell > *:first-child {
+  margin-left: 0;
+}
+
+.actions-cell > *:last-child {
+  margin-right: 0;
 }
 
 .btn-sm {
