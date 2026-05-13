@@ -404,7 +404,7 @@ const PageDetailPanel = ({
                   type="button"
                   className="quick-action-btn"
                   disabled={docTicketCreating || docTicketsBusy}
-                  title="Create a DOC Story with Confluence body as description, and link it (Relates) to the page’s reference Jira issue"
+                  title="Create a DOC Story with Confluence body as description, and link it (Relates) to the page's reference Jira issue"
                   onClick={async () => {
                     setDocTicketCreating(true);
                     try {
@@ -3569,11 +3569,11 @@ const BulkActionsBar = ({
             disabled={docTicketsCreating || !hasJiraTickets}
             title={
               hasJiraTickets
-                ? ‘Create a DOC Story per page and link it (Relates) to each page\’s reference Jira issue’
-                : ‘Select pages that have a linked Jira ticket’
+                ? "Create a DOC Story per page and link it (Relates) to each page's reference Jira issue"
+                : "Select pages that have a linked Jira ticket"
             }
           >
-            {docTicketsCreating ? ‘Creating DOC…’ : ‘Create DOC ticket(s)’}
+            {docTicketsCreating ? 'Creating DOC…' : 'Create DOC ticket(s)'}
           </button>
         )}
         {onMarkAsDuplicate && (
